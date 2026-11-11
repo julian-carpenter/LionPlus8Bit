@@ -17,6 +17,7 @@ This package quantizes **optimizer state**. It does not quantize your model to 8
 - [The ideas behind the optimizer](#the-ideas-behind-the-optimizer)
 - [How 8-bit storage saves memory](#how-8-bit-storage-saves-memory)
 - [Choose hyperparameters](#choose-hyperparameters)
+- [Adaptive clipping with AdaGC](#adaptive-clipping-with-adagc)
 - [Constructor reference](#constructor-reference)
 - [Mixed precision and accumulated gradients](#mixed-precision-and-accumulated-gradients)
 - [Parameter groups and selective precision](#parameter-groups-and-selective-precision)
@@ -198,6 +199,10 @@ LionPlus8bit(
     master_weights=True,
     native_gradient_scale=True,
     batched_norm=True,
+    clipping="global",
+    adagc_beta=0.99,
+    adagc_factor=1.04,
+    adagc_warmup_steps=100,
 )
 ```
 
@@ -389,3 +394,66 @@ ruff format --check .
 - [PyTorch AMP examples](https://docs.pytorch.org/docs/stable/notes/amp_examples.html).
 
 This package extends the native bnb optimizer; it is not an official implementation from the paper authors and is not affiliated with bitsandbytes. Code uses the [MIT license](LICENSE). Dependencies retain their own licenses.
+
+## Adaptive clipping with AdaGC
+
+Global clipping remains the default. To select AdaGC:
+
+```python
+optimizer = LionPlus8bit(
+    model.parameters(),
+    clipping="adagc",
+    max_grad_norm=1.0,
+    adagc_beta=0.99,
+    adagc_factor=1.04,
+    adagc_warmup_steps=100,
+)
+```
+
+Global clipping scales every gradient together when their combined length exceeds a fixed limit. A spike in one layer can therefore shrink all layers' gradients. AdaGC gives each parameter tensor its own changing limit, based on that tensor's recent gradient lengths. A tensor here means a complete parameter such as a weight matrix or bias vector, rather than each scalar weight.
+
+After warmup, for tensor `i` with gradient length `n`, previous history `gamma`, relative factor `r` and smoothing coefficient `b`:
+
+```text
+scale = min(1, r * gamma / n)
+clipped_gradient = scale * gradient
+new_gamma = b * gamma + (1 - b) * length(clipped_gradient)
+```
+
+Use scale one for a zero gradient. The old history determines clipping; the current spike cannot increase its own threshold before being clipped. Both Lion's sign decision and momentum update consume the clipped gradient. Decoupled weight decay keeps its existing behavior. This method comes from [AdaGC](https://arxiv.org/html/2502.11034v4); it differs from AGC methods that compare gradients with parameter lengths.
+
+For example, two tensors with histories 2 and 10 have ceilings 2.08 and 10.4 with factor 1.04. Current lengths 10 and 5 cause only the first tensor to be clipped. Their next histories become 2.0008 and 9.95 with smoothing 0.99.
+
+### Warmup and tuning
+
+The first 100 completed optimizer steps use global clipping and track the smallest positive **clipped** length for each tensor. Step 101 switches to AdaGC. AMP-skipped calls and calls with no gradients do not advance this counter. This clipping warmup is separate from learning-rate warmup.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `clipping` | `"global"` | Choose `"global"` or `"adagc"` |
+| `max_grad_norm` | `4.0` | Global threshold; AdaGC uses it during warmup and cold-start bootstrap |
+| `adagc_beta` | `0.99` | History smoothing; higher values adapt more slowly |
+| `adagc_factor` | `1.04` | Ceiling relative to history; must be finite and at least one |
+| `adagc_warmup_steps` | `100` | Number of completed global-clipping steps; zero is allowed |
+
+The example explicitly uses the paper's absolute threshold 1.0; selecting AdaGC does not silently change the package's existing 4.0 default. After warmup there is no additional global cap. Start comparisons with the same learning rate, weight decay, batch size and schedule as your global-clipping run. AdaGC's beta is separate from Lion's two betas.
+
+A larger factor clips less aggressively. With beta .99 and factor 1.04, a consistently clipped history grows by at most 0.04% per update. This can track sustained increases slowly, such as after a batch-size or loss-scale convention change. A factor of one prevents the ceiling from increasing. Evaluate validation quality and clipping behavior rather than choosing settings from training loss alone.
+
+### Zero gradients and late activation
+
+This package deliberately extends the paper's edge-case handling. Zero observations do not set a warmup minimum to zero, which would otherwise suppress all later positive gradients permanently. A tensor first activated after warmup receives one per-tensor absolute bootstrap clip and seeds its history from that result. The same rule applies when warmup is zero. `grad=None` does not change that tensor's history; a zero gradient can still cause momentum and weight-decay updates. Established histories decay on zero observations and become unseeded if they fall below FP32 work representability. No fixed denominator epsilon is added.
+
+The linked Paddle and author PyTorch reference implementations differ in warmup counting, raw-versus-clipped warmup history, and epsilon. This package follows exactly 100 steps and clipped histories, with the documented zero recovery above. These details matter for reproducibility.
+
+### AMP, memory and checkpoints
+
+Use FP32 parameters with autocast and ordinary `scaler.step(optimizer)`. Clipping runs inside the optimizer after unscaling, once after all microbatches have accumulated. Avoid an additional external clipping call. Overflow skips leave AdaGC history and counters unchanged.
+
+Actual FP16 parameters are different from FP16 autocast: ordinary PyTorch GradScaler refuses FP16 gradients. Internal FP32 master weights do not remove this restriction. Actual FP16 parameters require already unscaled gradients or a separately validated training integration. BF16 parameters can use the unscaled path; FP32 parameters with BF16 autocast are also appropriate.
+
+History is stored in packed FP32 buffers, with rare FP64 exceptions for extreme values. Its payload scales with the number of tensors, not the number of individual weights. Masks, scratch vectors, allocator overhead, and optional FP32 master weights add memory beyond the history payload. Native bitsandbytes kernels take host scale values, so AdaGC batches coefficient readback rather than synchronizing separately for every parameter. A device-vector fused update kernel is not included.
+
+Optimizer checkpoints save clipping policy, warmup progress and history. Loading old checkpoints restores global clipping. Reconstruct the same parameter-group order; same-shaped unnamed parameters swapped within a group cannot be identified automatically. Use a fresh optimizer when changing clipping strategy. On a native backend error after partial updates, restore a known checkpoint rather than continuing from partially updated state.
+
+AdaGC changes the original globally clipped Lion+ algorithm, so the original convergence assumptions do not automatically apply. Distributed shards, flattened logical tensors, CUDA graph capture, and FP8 require separate integration work. See [AdaGC validation](docs/validation-adagc.md) for measured results and limitations.

@@ -12,13 +12,22 @@ if triton is not None:
 
     @triton.jit
     def _guard(
-        G, S, FLAG, N: tl.constexpr, NS: tl.constexpr, GRAD_LIMIT, STATE_LIMIT, B: tl.constexpr
+        G,
+        S,
+        FLAG,
+        N: tl.constexpr,
+        NS: tl.constexpr,
+        GRAD_LIMIT,
+        STATE_LIMIT,
+        B: tl.constexpr,
+        DEVICE_LIMIT: tl.constexpr = False,
     ):
         i = tl.program_id(0) * B + tl.arange(0, B)
         # Integer magnitude comparisons preserve subnormals even under FTZ compilation.
         g = tl.load(G + i, i < N, other=0).to(tl.float32).to(tl.uint32, bitcast=True) & 0x7FFFFFFF
         s = tl.load(S + i, i < NS, other=0).to(tl.float32).to(tl.uint32, bitcast=True) & 0x7FFFFFFF
-        gl = tl.full((), GRAD_LIMIT, tl.float32).to(tl.uint32, bitcast=True)
+        limit = tl.load(GRAD_LIMIT) if DEVICE_LIMIT else tl.full((), GRAD_LIMIT, tl.float32)
+        gl = limit.to(tl.uint32, bitcast=True)
         sl = tl.full((), STATE_LIMIT, tl.float32).to(tl.uint32, bitcast=True)
         found = tl.sum(((g > 0) & (g < gl)) | ((s > 0) & (s < sl)), 0) > 0
         tl.atomic_max(FLAG, found.to(tl.int32))
@@ -63,3 +72,39 @@ def has_tiny_values(params, states, gradient_limit, cutoff=1e-20):
             limit = cutoff * (2**25 if state["state1"].dtype == torch.uint8 else 1)
             flags.append(((x > 0) & (x < limit)).any())
     return bool(torch.stack(flags).any()) if flags else False
+
+
+@torch.no_grad()
+def tiny_value_flag(params, states, limits, cutoff=1e-20):
+    """Device flag for AdaGC, using one gradient threshold per active tensor."""
+    device = params[0].device
+    flag = torch.zeros((), device=device, dtype=torch.int32)
+    if triton is not None and device.type == "cuda" and all(p.grad.is_contiguous() for p in params):
+        for i, p in enumerate(params):
+            if not p.numel():
+                continue
+            state = states.get(p, {})
+            value = state.get("absmax1", state.get("state1"))
+            count = value.numel() if value is not None else 0
+            _guard[(triton.cdiv(max(p.numel(), count), 1024),)](
+                p.grad,
+                value if value is not None else p.grad,
+                flag,
+                p.numel(),
+                count,
+                limits[i:],
+                cutoff * (2**25 if "absmax1" in state else 1),
+                1024,
+                True,
+            )
+        return flag
+    flags = []
+    for i, p in enumerate(params):
+        x = p.grad.detach().float().abs()
+        flags.append(((x > 0) & (x < limits[i])).any())
+        state = states.get(p, {})
+        if "state1" in state:
+            x = state.get("absmax1", state["state1"]).float().abs()
+            limit = cutoff * (2**25 if state["state1"].dtype == torch.uint8 else 1)
+            flags.append(((x > 0) & (x < limit)).any())
+    return torch.stack(flags).any().to(torch.int32) if flags else flag

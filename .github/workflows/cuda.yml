@@ -23,7 +23,9 @@ jobs:
       - name: Independent CUDA integration and fresh-process restart
         run: .venv-ci/bin/python tools/cuda_integration.py
       - name: CUDA example
-        run: .venv-ci/bin/python examples/train_regression.py --device cuda
+        run: |
+          .venv-ci/bin/python examples/train_regression.py --device cuda
+          .venv-ci/bin/python examples/train_regression.py --device cuda --clipping adagc
       - uses: actions/upload-artifact@v7.0.2
         if: always()
         with:

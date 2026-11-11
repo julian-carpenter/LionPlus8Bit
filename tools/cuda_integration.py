@@ -64,6 +64,8 @@ def worker(mode, kind, path):
     cfg = dict(
         lr=0.003, betas=(0.7, 0.91), weight_decay=0.02, max_grad_norm=0.7, min_8bit_size=4096
     )
+    if kind.startswith("adagc"):
+        cfg.update(clipping="adagc", adagc_warmup_steps=int(kind.split("_")[0][5:]))
     opt = LionPlus8bit(model.parameters(), **cfg)
     sched = torch.optim.lr_scheduler.StepLR(opt, step_size=3, gamma=0.9)
     scaler = torch.amp.GradScaler("cuda", init_scale=32, growth_interval=2)
@@ -84,7 +86,7 @@ def worker(mode, kind, path):
         losses = ck["losses"]
     for t in range(start, 5 if mode == "split" else 12):
         opt.zero_grad(set_to_none=True)
-        if kind == "replay":
+        if kind.endswith("replay"):
             for p in model.parameters():
                 p.grad = torch.randn_like(p) * (0.1 if t % 3 else 10)
             # Exercise scaler serialization even when no scaler is applicable to supplied gradients.
@@ -398,7 +400,7 @@ class Gates(unittest.TestCase):
         )
 
     def test_06_fresh_process_checkpoint(self):
-        for kind in ["replay", "training"]:
+        for kind in ["replay", "training", "adagc4_replay", "adagc5_training", "adagc6_training"]:
             path = OUT / kind
             path.mkdir(exist_ok=True)
             for mode in ["control", "split", "resume"]:
@@ -421,6 +423,7 @@ class Gates(unittest.TestCase):
             dict(
                 replay="bitwise equal",
                 training="bitwise equal",
+                adagc="bitwise equal before/at/after warmup boundary",
                 updates=12,
                 split_after=5,
                 restored=[

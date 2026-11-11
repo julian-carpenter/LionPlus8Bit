@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lionplus8bit"
 version = "0.1.0"
-description = "Lion+ with global gradient clipping and native bitsandbytes 8-bit optimizer state"
+description = "Lion+ with global or AdaGC clipping and native bitsandbytes 8-bit optimizer state"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"

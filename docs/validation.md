@@ -26,3 +26,6 @@ The packaging review identified and resolved two issues: an optimized-versus-leg
 ## Limits
 
 This work does not add a general convergence or speed guarantee. A prior exploratory real-audio subset study used the previous arithmetic policy; its results are not a new representative application study of the package defaults. DDP, paging, compiled optimizers and arbitrary DataLoader-worker resume remain unverified. Gradient shards and CUDA graph capture remain unsupported. The repository contains synthetic tests, not the original application data or checkpoints.
+
+
+The opt-in AdaGC implementation has separate [validation evidence and limitations](validation-adagc.md). The earlier results above describe the original global-clipping package.

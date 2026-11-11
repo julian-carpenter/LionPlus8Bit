@@ -16,7 +16,8 @@ import bitsandbytes as bnb
 import torch
 from packaging.version import Version
 from torch import Tensor
-from ._numerical_guard import has_tiny_values
+from ._numerical_guard import has_tiny_values, tiny_value_flag
+from ._clipping import ClippingConfig, ClippingState, prepare_clipping, commit_clipping
 
 __all__ = ["LionPlus8bit"]
 
@@ -71,6 +72,11 @@ class LionPlus8bit(bnb.optim.Lion8bit):
         master_weights: bool = True,
         native_gradient_scale: bool = True,
         batched_norm: bool = True,
+        *,
+        clipping: str = "global",
+        adagc_beta: float = 0.99,
+        adagc_factor: float = 1.04,
+        adagc_warmup_steps: int = 100,
     ) -> None:
         if Version(bnb.__version__) < Version("0.50.2"):
             raise ImportError("LionPlus8bit requires bitsandbytes >= 0.50.2")
@@ -80,6 +86,11 @@ class LionPlus8bit(bnb.optim.Lion8bit):
         if not isinstance(min_8bit_size, int) or min_8bit_size < 0:
             raise ValueError("min_8bit_size must be a nonnegative integer")
 
+        self.clipping_config = ClippingConfig(
+            clipping, adagc_beta, adagc_factor, adagc_warmup_steps
+        )
+        self._clipping_state = None
+        self.last_clipping = None
         self._initial_max_grad_norm = float(max_grad_norm)
         self._clip_scale: Tensor | None = None
         self.batched_norm = batched_norm
@@ -100,8 +111,20 @@ class LionPlus8bit(bnb.optim.Lion8bit):
         self.defaults["max_grad_norm"] = float(max_grad_norm)
         self._validate_groups()
 
+    @property
+    def clipping(self):
+        return self.clipping_config.mode
+
     def add_param_group(self, param_group: dict[str, Any]) -> None:
         param_group = dict(param_group)
+        for key, expected in (
+            ("clipping", self.clipping),
+            ("adagc_beta", self.clipping_config.beta),
+            ("adagc_factor", self.clipping_config.factor),
+            ("adagc_warmup_steps", self.clipping_config.warmup),
+        ):
+            if key in param_group and param_group.pop(key) != expected:
+                raise ValueError("Conflicting clipping policy in parameter group")
         current = (
             self.param_groups[0]["max_grad_norm"]
             if self.param_groups
@@ -111,6 +134,8 @@ class LionPlus8bit(bnb.optim.Lion8bit):
         if param_group["max_grad_norm"] != current and self.param_groups:
             raise ValueError("All parameter groups must use the same max_grad_norm")
         super().add_param_group(param_group)
+        if self._clipping_state is not None:
+            self._clipping_state.resize(sum(len(g["params"]) for g in self.param_groups))
 
     def _validate_groups(self) -> float:
         max_norm = self.param_groups[0]["max_grad_norm"]
@@ -165,6 +190,8 @@ class LionPlus8bit(bnb.optim.Lion8bit):
             if self.batched_norm
             else [torch.linalg.vector_norm(g, dtype=torch.float32) for g in gradients]
         )
+        if self.clipping == "adagc":
+            return self._adagc_step(params, gradients, torch.stack(norms), max_norm, loss)
         total_norm = torch.linalg.vector_norm(torch.stack(norms))
         norm_value = float(total_norm)
         # Rare FP64 path covers overflow, underflow and poorly resolved squared norms.
@@ -221,10 +248,93 @@ class LionPlus8bit(bnb.optim.Lion8bit):
             self._clip_scale = None
         return loss
 
+    def _adagc_step(self, params, gradients, norms, max_norm, loss):
+        all_params = [p for group in self.param_groups for p in group["params"]]
+        if len({id(p) for p in all_params}) != len(all_params):
+            raise ValueError("Duplicate parameters are unsupported")
+        state = self._clipping_state
+        if state is None:
+            state = ClippingState(len(all_params), params[0].device)
+        state.resize(len(all_params))
+        slot_map = {id(p): i for i, p in enumerate(all_params)}
+        slots = [slot_map[id(p)] for p in params]
+        plan = prepare_clipping(norms, slots, self.clipping_config, state, max_norm)
+        guard = tiny_value_flag(params, self.state, (1e-20 / plan.scales).float())
+        # Single ordinary-path readback: norms, scales, candidate history, readiness, guard.
+        packed = state.pack(norms, plan, guard)
+        if any(not math.isfinite(row[0]) or row[0] < 1e-18 for row in packed):
+            # Rare exact norm recovery distinguishes nonfinite input and finite reduction overflow.
+            norms = torch.stack(
+                [torch.linalg.vector_norm(g, dtype=torch.float64) for g in gradients]
+            )
+            if not bool(torch.isfinite(norms).all()):
+                raise RuntimeError("LionPlus8bit encountered a non-finite AdaGC gradient norm")
+            plan = prepare_clipping(norms, slots, self.clipping_config, state, max_norm)
+            guard = tiny_value_flag(params, self.state, (1e-20 / plan.scales).float())
+            packed = state.pack(norms, plan, guard)
+        if any(not math.isfinite(row[2]) for row in packed):
+            raise RuntimeError("Non-finite AdaGC history")
+        for n, scale, _, _, _ in packed:
+            if n > 0 and (scale <= 0 or (scale < 1 and scale * n < 2**-149)):
+                raise ValueError("AdaGC clipping threshold is below FP32 gradient representability")
+        plan.host = [row[1:4] for row in packed]
+        self._adagc_observed = {}
+        decisions = {id(p): (i, row) for i, (p, row) in enumerate(zip(params, packed))}
+        try:
+            if not self.initialized:
+                self.check_overrides()
+                self.to_gpu()
+                self.initialized = True
+            for gi, group in enumerate(self.param_groups):
+                for pi, p in enumerate(group["params"]):
+                    if p.grad is None:
+                        continue
+                    i, (norm, scale, _, _, tiny) = decisions[id(p)]
+                    self._clip_scale = plan.scales[i]
+                    self._needs_clip = scale < 1
+                    self._wide_clip = scale < torch.finfo(torch.float32).tiny or norm < 1e-18
+                    self._subnormal = bool(tiny) or (
+                        0 < norm < torch.finfo(torch.float32).tiny * 1024
+                    )
+                    self._native_scale = scale
+                    if not self.state[p]:
+                        self.init_state(group, p, gi, pi)
+                    self.prefetch_state(p)
+                    self.update_step(group, p, gi, pi)
+            if self.is_paged and params[0].device.type == "cuda":
+                torch.cuda.synchronize(params[0].device)
+            if self._adagc_observed:
+                observed = norms.double() * plan.scales
+                for i, p in enumerate(params):
+                    if id(p) in self._adagc_observed:
+                        observed[i] = self._adagc_observed[id(p)]
+                corrected = prepare_clipping(
+                    norms, slots, self.clipping_config, state, max_norm, observed=observed
+                )
+                plan.candidates, plan.ready, plan.host = corrected.candidates, corrected.ready, None
+            commit_clipping(state, plan)
+            self._clipping_state = state
+            self.last_clipping = dict(
+                norms=[row[0] for row in packed],
+                scales=[row[1] for row in packed],
+                histories=[row[1] for row in plan.host],
+                steps=state.steps,
+                warmup=state.steps <= self.clipping_config.warmup,
+            )
+        finally:
+            self._clip_scale = None
+            self._adagc_observed.clear()
+        return loss
+
     def state_dict(self):
         result = super().state_dict()
         result["lionplus_config"] = dict(
-            version=1,
+            version=2,
+            clipping=self.clipping,
+            adagc_beta=self.clipping_config.beta,
+            adagc_factor=self.clipping_config.factor,
+            adagc_warmup_steps=self.clipping_config.warmup,
+            edge_policy="positive-bootstrap-v1",
             min_8bit_size=self.args.min_8bit_size,
             is_paged=self.is_paged,
             master_weights=self.master_weights,
@@ -238,12 +348,110 @@ class LionPlus8bit(bnb.optim.Lion8bit):
                 for gi, g in enumerate(self.param_groups)
             ],
         )
+        if self.clipping == "adagc" and self._clipping_state is not None:
+            state = self._clipping_state
+            result["lionplus_clipping"] = dict(
+                history=state.history.clone(),
+                initialized=state.initialized.clone(),
+                exceptions=dict(state.exceptions),
+                steps=state.steps,
+                group_lengths=[len(g["params"]) for g in self.param_groups],
+                shapes=[tuple(p.shape) for g in self.param_groups for p in g["params"]],
+            )
         return result
 
     def load_state_dict(self, state_dict, move_to_device=True):
         config = state_dict.get("lionplus_config")
+        # Validate incoming groups before changing overrides, allocation policy,
+        # native state or clipping state. The base loader assigns groups eagerly.
+        incoming = state_dict.get("param_groups", [])
+        if len(incoming) != len(self.param_groups):
+            raise ValueError("Incompatible checkpoint parameter groups")
+        max_norm = None
+        overrides = config.get("overrides", []) if config else []
+        if overrides and len(overrides) != len(incoming):
+            raise ValueError("Incompatible checkpoint override groups")
+        for gi, (group, current) in enumerate(zip(incoming, self.param_groups)):
+            if len(group.get("params", [])) != len(current["params"]):
+                raise ValueError("Incompatible checkpoint parameter group size")
+            _validate_hyperparameters(group)
+            if max_norm is not None and group["max_grad_norm"] != max_norm:
+                raise ValueError("All parameter groups must use the same max_grad_norm")
+            max_norm = group["max_grad_norm"]
+            if overrides:
+                if len(overrides[gi]) != len(group["params"]):
+                    raise ValueError("Incompatible checkpoint parameter overrides")
+                for override in overrides[gi]:
+                    _validate_hyperparameters(dict(group, **override))
+        if (
+            config is not None
+            and config.get("version") == 2
+            and config.get("edge_policy") != "positive-bootstrap-v1"
+        ):
+            raise ValueError("Unsupported AdaGC edge policy")
+        mode = (
+            config.get("clipping", "global") if config and config.get("version") == 2 else "global"
+        )
+        clipping_config = (
+            ClippingConfig(
+                mode,
+                config.get("adagc_beta", 0.99),
+                config.get("adagc_factor", 1.04),
+                config.get("adagc_warmup_steps", 100),
+            )
+            if config
+            else ClippingConfig()
+        )
+        saved = state_dict.get("lionplus_clipping")
+        restored = None
+        if mode == "adagc" and saved is None and state_dict.get("state"):
+            raise ValueError("AdaGC checkpoint is missing clipping history")
+        if saved is not None:
+            parameters = [p for g in self.param_groups for p in g["params"]]
+            if (
+                mode != "adagc"
+                or saved["group_lengths"] != [len(g["params"]) for g in self.param_groups]
+                or saved["shapes"] != [tuple(p.shape) for p in parameters]
+            ):
+                raise ValueError("Incompatible AdaGC parameter mapping")
+            history, ready = saved["history"], saved["initialized"]
+            if (
+                history.dtype != torch.float32
+                or ready.dtype != torch.bool
+                or history.shape != (len(parameters),)
+                or ready.shape != history.shape
+            ):
+                raise ValueError("Invalid AdaGC history layout")
+            if (
+                isinstance(saved["steps"], bool)
+                or not isinstance(saved["steps"], int)
+                or saved["steps"] < 0
+            ):
+                raise ValueError("Invalid AdaGC step counter")
+            if not bool(torch.isfinite(history).all()) or bool((history < 0).any()):
+                raise ValueError("Invalid AdaGC history")
+            exceptions = saved["exceptions"]
+            if any(
+                isinstance(i, bool)
+                or not isinstance(i, int)
+                or not 0 <= i < len(parameters)
+                or not math.isfinite(v)
+                or v < 2**-149
+                for i, v in exceptions.items()
+            ):
+                raise ValueError("Invalid AdaGC exceptional history")
+            effective = history.double().cpu()
+            for i, v in exceptions.items():
+                effective[i] = v
+            if bool((ready.cpu() & (effective <= 0)).any()):
+                raise ValueError("Initialized AdaGC history must be positive")
+            restored = ClippingState(len(parameters), parameters[0].device)
+            restored.history.copy_(history)
+            restored.initialized.copy_(ready)
+            restored.exceptions = dict(exceptions)
+            restored.steps = saved["steps"]
         if config is not None:
-            if config.get("version") != 1:
+            if config.get("version") not in (1, 2):
                 raise ValueError("Unsupported LionPlus checkpoint configuration version")
             if self.state and (
                 self.is_paged != config["is_paged"]
@@ -259,6 +467,9 @@ class LionPlus8bit(bnb.optim.Lion8bit):
                 for p, override in zip(group["params"], overrides):
                     self.mng.pid2config[id(p)] = override
         super().load_state_dict(state_dict, move_to_device=move_to_device)
+        self.clipping_config = clipping_config
+        self._clipping_state = restored
+        self.last_clipping = None
         self._validate_groups()
         self.initialized = False
 
@@ -291,6 +502,17 @@ class LionPlus8bit(bnb.optim.Lion8bit):
             grad = grad.float()
         if use_master or use_scale:
             grad = grad.contiguous()
+        if (
+            self.clipping == "adagc"
+            and self._needs_clip
+            and not use_scale
+            and (
+                self._wide_clip
+                or self._subnormal
+                or (original_grad.dtype != torch.float32 and not use_master)
+            )
+        ):
+            self._adagc_observed[id(p)] = torch.linalg.vector_norm(grad, dtype=torch.float64)
         # Once a FP32 state uses strict arithmetic, retain it across checkpoints.
         strict = self._subnormal or state.get("strict_math", False)
         current = torch.cuda.current_stream(p.device) if p.device.type == "cuda" else None

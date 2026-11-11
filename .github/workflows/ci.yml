@@ -48,7 +48,9 @@ jobs:
       - name: Run CPU tests against installed wheel
         run: python -m pytest -m 'not cuda' --junitxml=cpu-results.xml
       - name: Run example
-        run: python examples/train_regression.py --device cpu
+        run: |
+          python examples/train_regression.py --device cpu
+          python examples/train_regression.py --device cpu --clipping adagc
       - uses: actions/upload-artifact@v7.0.2
         if: always()
         with:
