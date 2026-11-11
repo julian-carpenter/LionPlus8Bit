@@ -10,7 +10,7 @@ jobs:
     timeout-minutes: 30
     env:
       CUBLAS_WORKSPACE_CONFIG: ':4096:8'
-      LION_RESULTS: ${{ runner.temp }}/lionplus8bit-integration-${{ github.run_id }}-${{ github.run_attempt }}
+      LION_RESULTS: cuda-integration-results/${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@v7.0.1
       - name: Install into isolated environment using runner CUDA PyTorch
