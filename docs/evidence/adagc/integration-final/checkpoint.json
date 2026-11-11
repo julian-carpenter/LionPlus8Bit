@@ -1,0 +1,21 @@
+{
+  "replay": "bitwise equal",
+  "training": "bitwise equal",
+  "adagc": "bitwise equal before/at/after warmup boundary",
+  "updates": 12,
+  "split_after": 5,
+  "restored": [
+    "model",
+    "optimizer",
+    "scheduler",
+    "scaler",
+    "python_rng",
+    "numpy_rng",
+    "torch_cpu_rng",
+    "cuda_rng",
+    "data_position",
+    "constructor_config",
+    "manager_overrides"
+  ],
+  "sampler": "generated indexed stream; no DataLoader workers"
+}

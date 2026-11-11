@@ -1,0 +1,9 @@
+{
+  "max_momentum_abs_error": 9.313225746154785e-10,
+  "updates": 5,
+  "microbatches": 4,
+  "batch": 16,
+  "atol": 1e-07,
+  "rtol": 2e-05,
+  "reason": "FP32 GEMM and reduction order differ between full and micro batches; unquantized small-state test isolates accumulation"
+}

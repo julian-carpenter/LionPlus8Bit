@@ -1,0 +1,4 @@
+No prebuilt binary for CUDA 13.3, loading CUDA 13.2 instead. Set BNB_CUDA_VERSION to override.
+device=cuda, initial_mse=1.37663150, final_mse=0.01986357
+weight momentum: torch.uint8
+bias momentum: torch.float32

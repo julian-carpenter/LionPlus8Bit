@@ -1,0 +1,2 @@
+No prebuilt binary for CUDA 13.3, loading CUDA 13.2 instead. Set BNB_CUDA_VERSION to override.
+{'scope': 'Identical AdaGC-preprocessed FP32 gradient replay; independent Python norm-history oracle, 10-step warmup; next-sign disagreement measures quantized momentum only', 'total_elements': 435300, 'sign_disagreements': 4546, 'disagreement_fraction': 0.010443372386859637}

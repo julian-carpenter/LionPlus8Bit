@@ -1,0 +1,7 @@
+{
+  "max_momentum_abs_error": 5.9275955283100146e-08,
+  "minimum_nonzero_sign_margin": 0.012192338655300223,
+  "atol": 2e-07,
+  "rtol": 2e-06,
+  "reason": "FP32 rounding over four updates; sign mixtures deliberately away from zero"
+}

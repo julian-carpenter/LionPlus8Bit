@@ -1,0 +1,146 @@
+* Creating isolated environment: venv+pip...
+* Installing packages in isolated environment:
+  - setuptools>=77
+  - wheel
+* Getting build dependencies for sdist...
+running egg_info
+writing src/lionplus8bit.egg-info/PKG-INFO
+writing dependency_links to src/lionplus8bit.egg-info/dependency_links.txt
+writing requirements to src/lionplus8bit.egg-info/requires.txt
+writing top-level names to src/lionplus8bit.egg-info/top_level.txt
+reading manifest file 'src/lionplus8bit.egg-info/SOURCES.txt'
+reading manifest template 'MANIFEST.in'
+adding license file 'LICENSE'
+writing manifest file 'src/lionplus8bit.egg-info/SOURCES.txt'
+* Installed build dependency versions:
+  - setuptools==84.2.1
+  - wheel==0.48.0
+* Building sdist...
+running sdist
+running egg_info
+writing src/lionplus8bit.egg-info/PKG-INFO
+writing dependency_links to src/lionplus8bit.egg-info/dependency_links.txt
+writing requirements to src/lionplus8bit.egg-info/requires.txt
+writing top-level names to src/lionplus8bit.egg-info/top_level.txt
+reading manifest file 'src/lionplus8bit.egg-info/SOURCES.txt'
+reading manifest template 'MANIFEST.in'
+adding license file 'LICENSE'
+writing manifest file 'src/lionplus8bit.egg-info/SOURCES.txt'
+running check
+creating lionplus8bit-0.1.0
+creating lionplus8bit-0.1.0/.github/workflows
+creating lionplus8bit-0.1.0/docs
+creating lionplus8bit-0.1.0/docs/superpowers/plans
+creating lionplus8bit-0.1.0/examples
+creating lionplus8bit-0.1.0/src/lionplus8bit
+creating lionplus8bit-0.1.0/src/lionplus8bit.egg-info
+creating lionplus8bit-0.1.0/tests
+creating lionplus8bit-0.1.0/tools
+copying files to lionplus8bit-0.1.0...
+copying LICENSE -> lionplus8bit-0.1.0
+copying MANIFEST.in -> lionplus8bit-0.1.0
+copying README.md -> lionplus8bit-0.1.0
+copying pyproject.toml -> lionplus8bit-0.1.0
+copying .github/workflows/ci.yml -> lionplus8bit-0.1.0/.github/workflows
+copying .github/workflows/cuda.yml -> lionplus8bit-0.1.0/.github/workflows
+copying docs/implementation-adagc-progress.md -> lionplus8bit-0.1.0/docs
+copying docs/implementation-plan.md -> lionplus8bit-0.1.0/docs
+copying docs/validation.md -> lionplus8bit-0.1.0/docs
+copying docs/superpowers/plans/2026-11-11-adagc.md -> lionplus8bit-0.1.0/docs/superpowers/plans
+copying examples/train_regression.py -> lionplus8bit-0.1.0/examples
+copying src/lionplus8bit/__init__.py -> lionplus8bit-0.1.0/src/lionplus8bit
+copying src/lionplus8bit/_clipping.py -> lionplus8bit-0.1.0/src/lionplus8bit
+copying src/lionplus8bit/_numerical_guard.py -> lionplus8bit-0.1.0/src/lionplus8bit
+copying src/lionplus8bit/_optimizer.py -> lionplus8bit-0.1.0/src/lionplus8bit
+copying src/lionplus8bit/diagnostics.py -> lionplus8bit-0.1.0/src/lionplus8bit
+copying src/lionplus8bit/py.typed -> lionplus8bit-0.1.0/src/lionplus8bit
+copying src/lionplus8bit.egg-info/PKG-INFO -> lionplus8bit-0.1.0/src/lionplus8bit.egg-info
+copying src/lionplus8bit.egg-info/SOURCES.txt -> lionplus8bit-0.1.0/src/lionplus8bit.egg-info
+copying src/lionplus8bit.egg-info/dependency_links.txt -> lionplus8bit-0.1.0/src/lionplus8bit.egg-info
+copying src/lionplus8bit.egg-info/requires.txt -> lionplus8bit-0.1.0/src/lionplus8bit.egg-info
+copying src/lionplus8bit.egg-info/top_level.txt -> lionplus8bit-0.1.0/src/lionplus8bit.egg-info
+copying tests/conftest.py -> lionplus8bit-0.1.0/tests
+copying tests/test_adagc_cuda.py -> lionplus8bit-0.1.0/tests
+copying tests/test_adagc_optimizer.py -> lionplus8bit-0.1.0/tests
+copying tests/test_adagc_reference.py -> lionplus8bit-0.1.0/tests
+copying tests/test_compatibility.py -> lionplus8bit-0.1.0/tests
+copying tests/test_default_cpu.py -> lionplus8bit-0.1.0/tests
+copying tests/test_diagnostics.py -> lionplus8bit-0.1.0/tests
+copying tests/test_guard.py -> lionplus8bit-0.1.0/tests
+copying tests/test_new_policies.py -> lionplus8bit-0.1.0/tests
+copying tests/test_package.py -> lionplus8bit-0.1.0/tests
+copying tests/test_regressions.py -> lionplus8bit-0.1.0/tests
+copying tests/test_study_metrics.py -> lionplus8bit-0.1.0/tests
+copying tools/benchmark_clipping.py -> lionplus8bit-0.1.0/tools
+copying tools/cuda_integration.py -> lionplus8bit-0.1.0/tools
+copying tools/study_clipping.py -> lionplus8bit-0.1.0/tools
+Writing lionplus8bit-0.1.0/setup.cfg
+Creating tar archive
+removing 'lionplus8bit-0.1.0' (and everything under it)
+* Building wheel from sdist
+* Creating isolated environment: venv+pip...
+* Installing packages in isolated environment:
+  - setuptools>=77
+  - wheel
+* Getting build dependencies for wheel...
+running egg_info
+writing src/lionplus8bit.egg-info/PKG-INFO
+writing dependency_links to src/lionplus8bit.egg-info/dependency_links.txt
+writing requirements to src/lionplus8bit.egg-info/requires.txt
+writing top-level names to src/lionplus8bit.egg-info/top_level.txt
+reading manifest file 'src/lionplus8bit.egg-info/SOURCES.txt'
+reading manifest template 'MANIFEST.in'
+adding license file 'LICENSE'
+writing manifest file 'src/lionplus8bit.egg-info/SOURCES.txt'
+* Installed build dependency versions:
+  - setuptools==84.2.1
+  - wheel==0.48.0
+* Building wheel...
+running bdist_wheel
+running build
+running build_py
+creating build/lib/lionplus8bit
+copying src/lionplus8bit/_clipping.py -> build/lib/lionplus8bit
+copying src/lionplus8bit/diagnostics.py -> build/lib/lionplus8bit
+copying src/lionplus8bit/__init__.py -> build/lib/lionplus8bit
+copying src/lionplus8bit/_numerical_guard.py -> build/lib/lionplus8bit
+copying src/lionplus8bit/_optimizer.py -> build/lib/lionplus8bit
+running egg_info
+writing src/lionplus8bit.egg-info/PKG-INFO
+writing dependency_links to src/lionplus8bit.egg-info/dependency_links.txt
+writing requirements to src/lionplus8bit.egg-info/requires.txt
+writing top-level names to src/lionplus8bit.egg-info/top_level.txt
+reading manifest file 'src/lionplus8bit.egg-info/SOURCES.txt'
+reading manifest template 'MANIFEST.in'
+adding license file 'LICENSE'
+writing manifest file 'src/lionplus8bit.egg-info/SOURCES.txt'
+copying src/lionplus8bit/py.typed -> build/lib/lionplus8bit
+installing to build/bdist.linux-x86_64/wheel
+running install
+running install_lib
+creating build/bdist.linux-x86_64/wheel
+creating build/bdist.linux-x86_64/wheel/lionplus8bit
+copying build/lib/lionplus8bit/_clipping.py -> build/bdist.linux-x86_64/wheel/./lionplus8bit
+copying build/lib/lionplus8bit/diagnostics.py -> build/bdist.linux-x86_64/wheel/./lionplus8bit
+copying build/lib/lionplus8bit/__init__.py -> build/bdist.linux-x86_64/wheel/./lionplus8bit
+copying build/lib/lionplus8bit/_numerical_guard.py -> build/bdist.linux-x86_64/wheel/./lionplus8bit
+copying build/lib/lionplus8bit/py.typed -> build/bdist.linux-x86_64/wheel/./lionplus8bit
+copying build/lib/lionplus8bit/_optimizer.py -> build/bdist.linux-x86_64/wheel/./lionplus8bit
+running install_egg_info
+Copying src/lionplus8bit.egg-info to build/bdist.linux-x86_64/wheel/./lionplus8bit-0.1.0-py3.12.egg-info
+running install_scripts
+creating build/bdist.linux-x86_64/wheel/lionplus8bit-0.1.0.dist-info/WHEEL
+creating '/abyss/home/ml/lion_8bit/LionPlus8Bit/results/adagc/dist/.tmp-oomb91jh/lionplus8bit-0.1.0-py3-none-any.whl' and adding 'build/bdist.linux-x86_64/wheel' to it
+adding 'lionplus8bit/__init__.py'
+adding 'lionplus8bit/_clipping.py'
+adding 'lionplus8bit/_numerical_guard.py'
+adding 'lionplus8bit/_optimizer.py'
+adding 'lionplus8bit/diagnostics.py'
+adding 'lionplus8bit/py.typed'
+adding 'lionplus8bit-0.1.0.dist-info/licenses/LICENSE'
+adding 'lionplus8bit-0.1.0.dist-info/METADATA'
+adding 'lionplus8bit-0.1.0.dist-info/WHEEL'
+adding 'lionplus8bit-0.1.0.dist-info/top_level.txt'
+adding 'lionplus8bit-0.1.0.dist-info/RECORD'
+removing build/bdist.linux-x86_64/wheel
+Successfully built lionplus8bit-0.1.0.tar.gz and lionplus8bit-0.1.0-py3-none-any.whl

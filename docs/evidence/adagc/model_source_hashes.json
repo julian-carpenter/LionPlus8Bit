@@ -1,0 +1,8 @@
+{
+  "frontends.py": "5f9138616318dd7a93dd8f709dd5f61fa60c32d5384675788518246134847f3e",
+  "models.py": "02aacee1643ca1d01b142961904cfa9ed99e7d101affeeb6beefdff72a43f01f",
+  "modules.py": "2c81572c95fa2a54b9903d597849987fea7defff1494393bf7689c2c089dabd6",
+  "optimized_frontends.py": "eaaa7122c90cda80a86b4a5ee14ffa41cc7f0ea77a95aac93de4be7979bed100",
+  "optimized_stems.py": "001c7c3cd2b9a4f3271cde106a316f49e05667ddbcfb4b32ad9f0ee66c6b8d49",
+  "stems.py": "7263ecbc678835a8047319250c23ce014d54b4e40df27b4a770df7be6d38ed0f"
+}

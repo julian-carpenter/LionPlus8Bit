@@ -1,0 +1,74 @@
+[
+  {
+    "run": "adagc-32-seed17",
+    "state_elements": {
+      "torch.uint8": 0,
+      "torch.float32": 83276
+    },
+    "clipping_steps": 1100
+  },
+  {
+    "run": "adagc-32-seed29",
+    "state_elements": {
+      "torch.uint8": 0,
+      "torch.float32": 83276
+    },
+    "clipping_steps": 1100
+  },
+  {
+    "run": "adagc-32-seed43",
+    "state_elements": {
+      "torch.uint8": 0,
+      "torch.float32": 83276
+    },
+    "clipping_steps": 1100
+  },
+  {
+    "run": "adagc-8-seed17",
+    "state_elements": {
+      "torch.uint8": 81920,
+      "torch.float32": 1356
+    },
+    "clipping_steps": 1100
+  },
+  {
+    "run": "adagc-8-seed29",
+    "state_elements": {
+      "torch.uint8": 81920,
+      "torch.float32": 1356
+    },
+    "clipping_steps": 1100
+  },
+  {
+    "run": "adagc-8-seed43",
+    "state_elements": {
+      "torch.uint8": 81920,
+      "torch.float32": 1356
+    },
+    "clipping_steps": 1100
+  },
+  {
+    "run": "global-8-seed17",
+    "state_elements": {
+      "torch.uint8": 81920,
+      "torch.float32": 1356
+    },
+    "clipping_steps": null
+  },
+  {
+    "run": "global-8-seed29",
+    "state_elements": {
+      "torch.uint8": 81920,
+      "torch.float32": 1356
+    },
+    "clipping_steps": null
+  },
+  {
+    "run": "global-8-seed43",
+    "state_elements": {
+      "torch.uint8": 81920,
+      "torch.float32": 1356
+    },
+    "clipping_steps": null
+  }
+]

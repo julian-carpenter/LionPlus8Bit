@@ -1,0 +1,94 @@
+{
+  "strategy": "adagc",
+  "momentum_bits": 32,
+  "seed": 29,
+  "config": {
+    "created_utc": "2026-11-11T07:59:31.459946+00:00",
+    "status": "prespecified before outcomes",
+    "scope": "Exploratory fixed real-audio subset with custom BCE; not production validation",
+    "primary_metric": "mean validation binary cross entropy across 12 clip-presence classes; lower is better",
+    "margin_relative_loss": 0.02,
+    "confidence": 0.95,
+    "uncertainty": "paired relative losses; two-sided Student t interval, df=2, critical=4.3026527299; pass upper<=.02, fail lower>.02, otherwise inconclusive; representative validation remains inconclusive regardless",
+    "seeds": [
+      17,
+      29,
+      43
+    ],
+    "pilot": {
+      "updates": 500,
+      "wall_seconds": 300,
+      "memory_limit_bytes": 8589934592
+    },
+    "main": {
+      "updates": 1000,
+      "wall_seconds": 300,
+      "memory_limit_bytes": 8589934592
+    },
+    "batch_size": 8,
+    "accumulation": 1,
+    "precision": "FP32 model weights; FP16 autocast and CUDA GradScaler",
+    "lr": 0.0003,
+    "betas": [
+      0.95,
+      0.98
+    ],
+    "weight_decay": 0.001,
+    "clip": 1.0,
+    "schedule": "cosine over declared updates; no warmup",
+    "warmup_measurement_steps": 50,
+    "model": {
+      "num_bands": 32,
+      "max_sr": 8000,
+      "min_sr": 8000,
+      "band_sr": 1000,
+      "baseline_type": "log_mel",
+      "embed_dim": 64,
+      "depth": 1,
+      "num_heads": 4,
+      "num_classes": 12
+    },
+    "split": "metadata fold 0, first 256 train IDs and first 64 validation IDs in published order; no test set",
+    "data": "/abyss/home/ml/lion_8bit/lion_plus_revised/study_release/data.pt",
+    "data_sha256": "b3ef974bad922dc9110b10735cd31baf4a91385b302c57fc0e82d9e77b35ced9",
+    "model_module": "models",
+    "model_class": "BaselineModel",
+    "model_sha256": "02aacee1643ca1d01b142961904cfa9ed99e7d101affeeb6beefdff72a43f01f",
+    "model_kwargs": {
+      "num_bands": 32,
+      "max_sr": 8000,
+      "min_sr": 8000,
+      "band_sr": 1000,
+      "baseline_type": "log_mel",
+      "embed_dim": 64,
+      "depth": 1,
+      "num_heads": 4,
+      "num_classes": 12
+    },
+    "steps": 1100,
+    "max_grad_norm": 1.0,
+    "performance_budget": "<=25% mean e2e slowdown",
+    "memory_budget_bytes": 8589934592
+  },
+  "config_sha256": "b12e4826b73013dfcb14832e89060d2a95e141d399fb8d9d90923ffb0fa6e679",
+  "initial_sha256": "df1e647beba4cf8d9301fbfaa220e4cd745ed8abfbff906b8dfdbc91cfaa2876",
+  "order_sha256": "156192e6b8793bb03c78f50e54fa5e6f658e40ceb09d86c4857031f29f1f9f95",
+  "environment": {
+    "python": "3.12.3",
+    "torch": "2.13.0a0+9186a08b2c.nv26.07",
+    "bitsandbytes": "0.50.2",
+    "cuda": "13.3",
+    "gpu": "Quadro RTX 6000"
+  },
+  "validation_bce": 0.34399867057800293,
+  "updates": 1100,
+  "successful_updates": 1100,
+  "overflow_skips": 0,
+  "spike_score": 0.0,
+  "peak_allocated": 147240960,
+  "peak_reserved": 182452224,
+  "elapsed_seconds": 26.155654957983643,
+  "examples_per_second": 379.8066466241715,
+  "finite_losses": true,
+  "scope": "Exploratory real-audio subset, custom clip-presence BCE; no production convergence claim"
+}

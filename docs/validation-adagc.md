@@ -7,10 +7,10 @@ and versioned checkpoints. See the README for API and engineering extensions.
 
 ## Verified properties
 
-- Final complete installed-wheel test suite: **79 passed**, plus 15 subtests; see `results/adagc/full-suite.log`.
+- Final complete installed-wheel test suite: **79 passed**, plus 15 subtests; see [full-suite.log](evidence/adagc/full-suite.log).
 - CPU-only CI collection with CUDA hidden: **50 passed, 29 deselected**, plus 15 subtests.
 - Six independent CUDA integration groups passed, including bitwise-equal fresh-process
-  AdaGC resumes before, at and after warmup; see `integration-final.log` and `integration-final/`.
+  AdaGC resumes before, at and after warmup; see [integration-final.log](evidence/adagc/integration-final.log) and its [summaries](evidence/adagc/integration-final).
 - Numerical oracle, FP16/BF16 master weights, uint8 and FP32 momentum, AMP overflow skips,
   uneven accumulation, noncontiguous gradients, nondefault streams, tiny values, invalid
   checkpoint rejection without mutation, and dtype-preserving checkpoint restore tested.
@@ -86,47 +86,44 @@ rounding, native state and optional FP32 master weights; it is not simply four b
 
 ## Reproducibility and raw evidence
 
-Run from the repository root with the compatible CUDA PyTorch environment:
+The [portable evidence directory](evidence/adagc/README.md) includes final logs,
+raw timing samples, compressed per-update application records, frozen configuration,
+source/input hashes, allocation inventory and reproduction scripts. It excludes audio,
+trained checkpoints and large Chrome traces. Verify the directory's `SHA256SUMS` before
+comparing records. The original local archive retains superseded measurements and binary
+artifacts; the published application records use the corrected timing implementation.
+
+Run from the repository root with a compatible CUDA PyTorch environment:
 
 ```bash
 python -m pip install -e '.[dev]'
 python -m pytest --require-cuda -q
-python tools/cuda_integration.py
+LION_RESULTS=results/integration python tools/cuda_integration.py
 python examples/train_regression.py --device cuda --clipping adagc
 python -m ruff check .
 python -m ruff format --check .
 python -m build
 python -m twine check --strict dist/*
+mkdir -p results/adagc
+python docs/evidence/adagc/run_benchmarks.py
+python docs/evidence/adagc/replay_signs.py
 ```
 
-This machine used isolated tool dependencies in `/tmp/lionplus-adagc-dev`, bnb in
-`/abyss/home/ml/lion_8bit/verification_20261111/deps`, and source under this checkout's `src`
-on PYTHONPATH. The final full test run instead resolves the built wheel from
-`/tmp/lionplus-adagc-wheel-final` to verify packaged behavior. CPU checks set
-`CUDA_VISIBLE_DEVICES=''`. Raw logs record the actual environment and results.
+The final test run used an installed wheel whose optimizer, clipping and numerical-guard
+sources matched the checkout byte for byte. CPU checks hid CUDA. The local environment
+used isolated development dependencies and the pinned bnb version; raw logs retain those
+paths as provenance, not as setup requirements.
 
-Exact study/benchmark invocations and frozen configuration are in
-`results/adagc/run_campaign.py`, `run_benchmarks.py`, and `study_config.json`:
+Synthetic tests, benchmarks and sign replay require no application dataset. The audio
+campaign requires external model sources and a prepared tensor cache. See the evidence
+README for their hashes, configuration and invocation. Reproducing this custom subset
+study requires those inputs; this repository does not reproduce the full project's loader.
+Use fresh output directories because the tools refuse overwrite.
 
-```bash
-export CUBLAS_WORKSPACE_CONFIG=:4096:8
-# Add the preserved application_sources directory to PYTHONPATH for models.BaselineModel.
-python results/adagc/run_campaign.py
-python results/adagc/run_benchmarks.py
-```
-
-Use fresh output directories: tools refuse overwrite. The data cache and supporting model
-sources are external to the package; paths and SHA-256 hashes are recorded in the config
-and `model_source_hashes.json`. Original data preparation and split manifest remain in
-`lion_plus_revised/study_release/`. The normal project dataset/loader is not reproduced here.
-
-The raw bundle `lionplus8bit_adagc_evidence.zip` contains JSON, logs, traces, campaign scripts,
-configuration, build artifacts and model/optimizer checkpoints. `SHA256SUMS` records hashes.
-The first study's quality results are retained under `study-timing-v1/`; its throughput is
-invalid and excluded because queued backward work was mistakenly subtracted as diagnostics.
-An initially overlapping benchmark sample is retained as `overlap-discarded-*` and excluded.
-The entire study was repeated after the timing fix. Original snapshots and first-run evidence
-were not edited.
+The first study's throughput was invalid because the diagnostic timer included queued
+backward work. The complete campaign was rerun after the fix; quality outcomes matched.
+An initially overlapping benchmark sample was excluded. Original snapshots and first-run
+evidence remain unchanged in the original local archive.
 
 ## Momentum sign diagnostic
 
@@ -135,8 +132,8 @@ An independent Python AdaGC norm-history oracle clipped 100 replayed gradients f
 identical clipped gradients. Before updates, 4,546 of
 435,300 sign decisions disagreed (**1.044%**).
 This measures quantization behavior on one replay, not an accuracy guarantee or a defect
-threshold. Raw margins/errors are retained in `sign_replay.json`; rerun with
-`python results/adagc/replay_signs.py`.
+threshold. Raw margins/errors are retained in [sign_replay.json](evidence/adagc/sign_replay.json); rerun with
+`python docs/evidence/adagc/replay_signs.py`.
 
 ## Failures and unresolved questions
 

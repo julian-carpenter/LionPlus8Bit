@@ -1,0 +1,19 @@
+..................................................        [100%]
+=============================== warnings summary ===============================
+../../../../../usr/local/lib/python3.12/dist-packages/anyio/pytest_plugin.py:14
+  /usr/local/lib/python3.12/dist-packages/anyio/pytest_plugin.py:14: PytestRemovedIn10Warning: _pytest.python.CallSpec2 has been renamed to CallSpec.
+  The CallSpec2 alias will be removed in pytest 10.
+  Update imports to use CallSpec instead.
+  See https://docs.pytest.org/en/stable/deprecations.html#callspec2-renamed
+    from _pytest.python import CallSpec2
+
+../../../../../usr/local/lib/python3.12/dist-packages/torch/jit/_script.py:365: 14 warnings
+  /usr/local/lib/python3.12/dist-packages/torch/jit/_script.py:365: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+tests/test_compatibility.py::LionPlus8bitTests::test_unsupported_gradient_types_rejected
+  /abyss/home/ml/lion_8bit/LionPlus8Bit/tests/test_compatibility.py:333: UserWarning: Sparse invariant checks are implicitly disabled. Memory errors (e.g. SEGFAULT) will occur when operating on a sparse tensor which violates the invariants, but checks incur performance overhead. To silence this warning, explicitly opt in or out. See `torch.sparse.check_sparse_tensor_invariants.__doc__` for guidance.  (Triggered internally at /opt/pytorch/pytorch/aten/src/ATen/Context.cpp:816.)
+    p.grad = torch.sparse_coo_tensor([[0]], [1.0], (2,), device=DEVICE, check_invariants=True)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+50 passed, 29 deselected, 16 warnings, 15 subtests passed in 3.01s

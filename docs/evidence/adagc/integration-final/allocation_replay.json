@@ -1,0 +1,86 @@
+{
+  "cases": [
+    {
+      "n": 255,
+      "threshold": 0,
+      "dtype": "torch.uint8",
+      "scale_count": 1
+    },
+    {
+      "n": 255,
+      "threshold": 4096,
+      "dtype": "torch.float32",
+      "scale_count": 0
+    },
+    {
+      "n": 256,
+      "threshold": 0,
+      "dtype": "torch.uint8",
+      "scale_count": 1
+    },
+    {
+      "n": 256,
+      "threshold": 4096,
+      "dtype": "torch.float32",
+      "scale_count": 0
+    },
+    {
+      "n": 257,
+      "threshold": 0,
+      "dtype": "torch.uint8",
+      "scale_count": 2
+    },
+    {
+      "n": 257,
+      "threshold": 4096,
+      "dtype": "torch.float32",
+      "scale_count": 0
+    },
+    {
+      "n": 4095,
+      "threshold": 0,
+      "dtype": "torch.uint8",
+      "scale_count": 16
+    },
+    {
+      "n": 4095,
+      "threshold": 4096,
+      "dtype": "torch.float32",
+      "scale_count": 0
+    },
+    {
+      "n": 4096,
+      "threshold": 4096,
+      "dtype": "torch.uint8",
+      "scale_count": 16
+    },
+    {
+      "n": 4097,
+      "threshold": 4096,
+      "dtype": "torch.uint8",
+      "scale_count": 17
+    },
+    {
+      "n": 8192,
+      "threshold": 4096,
+      "dtype": "torch.uint8",
+      "scale_count": 32
+    },
+    {
+      "n": 10003,
+      "threshold": 4096,
+      "dtype": "torch.uint8",
+      "scale_count": 40
+    },
+    {
+      "n": 1048577,
+      "threshold": 4096,
+      "dtype": "torch.uint8",
+      "scale_count": 4097
+    }
+  ],
+  "updates_per_case": 6,
+  "parameter_and_state_discrepancy": 0,
+  "nonfinite_cases": 3,
+  "comparison": "exact"
+}

@@ -1,0 +1,5 @@
+No prebuilt binary for CUDA 13.3, loading CUDA 13.2 instead. Set BNB_CUDA_VERSION to override.
+usage: cuda_integration.py [-h] [-v] [-q] [--locals] [--durations N] [-f] [-c]
+                           [-b] [-k TESTNAMEPATTERNS]
+                           [tests ...]
+cuda_integration.py: error: unrecognized arguments: --require-cuda

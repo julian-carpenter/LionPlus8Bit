@@ -1,0 +1,42 @@
+[
+  {
+    "dtype": "torch.float16",
+    "steps": [
+      {
+        "success": true,
+        "scale": 16.0,
+        "scheduler_epoch": 1
+      },
+      {
+        "success": false,
+        "scale": 8.0,
+        "scheduler_epoch": 1
+      },
+      {
+        "success": true,
+        "scale": 8.0,
+        "scheduler_epoch": 2
+      }
+    ]
+  },
+  {
+    "dtype": "torch.bfloat16",
+    "steps": [
+      {
+        "success": true,
+        "scale": 16.0,
+        "scheduler_epoch": 1
+      },
+      {
+        "success": false,
+        "scale": 8.0,
+        "scheduler_epoch": 1
+      },
+      {
+        "success": true,
+        "scale": 8.0,
+        "scheduler_epoch": 2
+      }
+    ]
+  }
+]

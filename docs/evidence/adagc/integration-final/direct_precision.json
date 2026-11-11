@@ -1,0 +1,12 @@
+[
+  {
+    "dtype": "torch.float16",
+    "native_parity": "exact",
+    "native_bf16_hardware": false
+  },
+  {
+    "dtype": "torch.bfloat16",
+    "native_parity": "exact",
+    "native_bf16_hardware": false
+  }
+]

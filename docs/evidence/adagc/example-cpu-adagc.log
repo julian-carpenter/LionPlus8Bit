@@ -1,0 +1,3 @@
+device=cpu, initial_mse=1.40007544, final_mse=0.01850740
+weight momentum: torch.uint8
+bias momentum: torch.float32
