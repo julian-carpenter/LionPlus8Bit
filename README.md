@@ -6,7 +6,7 @@
 
 LionPlus8Bit combines Lion's signed updates, gradient clipping before momentum, and bitsandbytes' blockwise momentum quantization. Optimized execution is the default. Global clipping is the default policy; AdaGC is an option for clipping each parameter tensor against its own recent gradient history.
 
-The package is an early release. It saves optimizer-state memory, but task quality and speed depend on your workload. The [corrective validation](docs/validation-audit-fixes.md) passed 172 tests, 15 subtests and six independent CUDA integration groups, including new AMP, checkpoint and numerical fallback regressions. AdaGC's three-seed application quality comparison was inconclusive, and it increased optimizer-only latency in the tested replay matrix. See [validation](#validation-and-limitations) before choosing a policy.
+Use it when you want Lion-style updates with less momentum memory and clipping built into the optimizer. Keep model parameters in FP32 and use autocast for mixed-precision training. The package is an early release: choose global clipping or AdaGC using your own validation metric and training-time measurements. The [validation section](#validation-and-limitations) describes tested configurations and the limits of the available evidence.
 
 ## Contents
 
@@ -14,6 +14,7 @@ The package is an early release. It saves optimizer-state memory, but task quali
 - [Quick start](#quick-start)
 - [Lion, Lion+, and AdaGC explained](#lion-lion-and-adagc-explained)
 - [How 8-bit momentum saves memory](#how-8-bit-momentum-saves-memory)
+- [Execution and numerical safeguards](#execution-and-numerical-safeguards)
 - [Choosing hyperparameters](#choosing-hyperparameters)
 - [Constructor reference](#constructor-reference)
 - [Mixed precision and gradient accumulation](#mixed-precision-and-gradient-accumulation)
@@ -120,7 +121,7 @@ $$
 
 $$
 \theta_t = (1-\eta_t\lambda)\theta_{t-1}
-           - \eta_t\operatorname{sign}(c_t)
+           - \eta_t\mathrm{sign}(c_t)
 $$
 
 $$
@@ -153,7 +154,7 @@ h_i=\min\left(1,\frac{r\gamma_i}{n_i}\right),\qquad
 $$
 
 $$
-\gamma_i^{new}=b\gamma_i+(1-b)\lVert\widehat g_i\rVert_2.
+\gamma_i^{\mathrm{new}}=b\gamma_i+(1-b)\lVert\widehat g_i\rVert_2.
 $$
 
 The previous history determines the threshold, and the **clipped** norm updates history. There is no EMA bias correction. Use scale one for zero gradients. This is history-based gradient clipping, distinct from AGC methods that compare gradients with parameter lengths. [AdaGC paper, Section 4 and Algorithm 1](https://arxiv.org/html/2502.11034v4).
@@ -171,7 +172,7 @@ This package defines edge cases beyond the paper's equations:
 - `grad=None` leaves that tensor's history unchanged. An active zero gradient can still trigger momentum and weight-decay updates. Established histories decay on zero observations and become unseeded below FP32 work representability.
 - An explicit zero branch replaces a fixed denominator epsilon. Tiny and extreme values use per-tensor numerical fallback paths.
 
-The linked Paddle and author PyTorch reference implementations differ in warmup counting, raw versus clipped warmup history, and epsilon. This implementation uses exactly 100 steps by default and clipped history with the zero recovery above. See the [design and implementation record](docs/superpowers/plans/2026-11-11-adagc.md) for those decisions.
+With the defaults, clipping warmup lasts exactly 100 successful optimizer steps. Its history uses positive clipped norms. A later zero gradient can decay an established history, while a tensor without positive history uses the absolute bootstrap threshold on its next nonzero gradient.
 
 AdaGC changes the globally clipped Lion+ algorithm. The original global-bound theory does not automatically cover this adaptive policy, 8-bit momentum, or arbitrary floating-point behavior.
 
@@ -194,9 +195,25 @@ for momentum codes and scales, plus its share of a codebook. FP32 momentum uses 
 
 One million eligible elements therefore use about 1.02 MB of momentum payload instead of 4 MB. Gradients, model weights, activations, temporary buffers, and allocator reserves still occupy memory. A roughly 75% momentum reduction does not mean 75% less total training VRAM.
 
-With actual FP16/BF16 parameters, the default FP32 master weights add another $4N$ bytes for those parameters. FP32 parameters with autocast avoid this extra master copy. AdaGC adds packed FP32 history per tensor, masks, cached indices and readback storage; small metadata vectors use FP64 arithmetic and rare histories use FP64 exceptions. There is no ordinary parameter-sized FP32 shadow momentum for quantized tensors. Strict arithmetic is selected per affected tensor and remains conservative across checkpoints. Strict uint8 updates decode/requantize momentum in chunks of at most 65,536 elements with independent 256-element block scales. This bounds momentum scratch; clipping and flattening a strided gradient can still allocate a full gradient temporary. Old checkpoints with conservative `strict_math` flags retain those flags for numerical continuity.
+With actual FP16/BF16 parameters, the default FP32 master weights add another $4N$ bytes for those parameters. FP32 parameters with autocast avoid this extra master copy. AdaGC stores FP32 history per parameter tensor, initialization masks, a bounded cache of active indices, and packed readback buffers. Metadata calculations use FP64, with exceptional history values stored separately.
+
+Quantized momentum has no persistent FP32 shadow copy. When a tensor needs strict arithmetic, the optimizer decodes and requantizes its momentum in chunks of at most 65,536 elements. Each 256-element block keeps its own scale, so a large block does not erase a separately representable small block during normalization. Chunking bounds momentum scratch memory; gradient clipping, FP64 norm recovery, or flattening a strided gradient can still allocate gradient-sized temporaries.
 
 Quantization introduces error, including possible sign changes near zero. Use FP32 controls and your own validation metric to decide whether the memory savings suit your task.
+
+## Execution and numerical safeguards
+
+The default execution settings are `native_gradient_scale=True` and `batched_norm=True`. They batch the initial norm calculations and pass clipping coefficients to bitsandbytes kernels when the numerical guard permits it. This avoids materializing a clipped gradient for ordinary FP32 updates.
+
+The guard examines gradients and momentum state per tensor. Contiguous CUDA tensors use a fused Triton scan when available; a strided tensor uses an eager scan while other eligible tensors keep their fused path. Without Triton, the guard uses PyTorch operations.
+
+For AdaGC, the scan also distinguishes exact-zero gradients from nonzero gradients whose FP32 norm underflowed. Only suspect tensors undergo FP64 norm recovery. A zero auxiliary gradient therefore does not send unrelated matrices through FP64 reduction.
+
+Tiny values select strict arithmetic for the affected tensor. That choice persists across subsequent updates and checkpoints to preserve numerical continuity. Other tensors keep their ordinary update path. Strict uint8 updates use the block scales and bounded momentum scratch described above.
+
+AdaGC transfers norms, coefficients and guard metadata to the host in one packed readback on the ordinary path. Rare numerical recovery can require additional readbacks. The native API accepts host coefficients, so execution includes host synchronization. GradScaler and logging can add their own synchronization costs.
+
+Nonfinite gradients fail before parameter updates. Finite gradients whose FP32 norm overflows can recover through FP64 reduction. The optimizer accepts the minimum positive FP32 clipping bound, but rejects a smaller positive bound when clipping requires it. A backend error during an update can leave partially updated parameters; restore a known checkpoint before continuing.
 
 ## Choosing hyperparameters
 
@@ -256,7 +273,7 @@ Optimized defaults batch norm calculations and pass scale values to native kerne
 
 `master_weights=True` maintains FP32 copies for actual FP16/BF16 parameters. Keep it enabled unless you deliberately accept rounding of small weight updates. `is_paged=True` exposes native paging, which remains unverified here.
 
-For legacy arithmetic comparisons, set both `native_gradient_scale=False` and `batched_norm=False`. Safety checks remain active. Nonfinite gradients fail before updates; extreme norms/scales use FP64 work, and tiny values use strict arithmetic to avoid native flush-to-zero loss. A positive clipping request below FP32 representability fails when clipping is needed. A backend error partway through updates can leave partially updated parameters: restore a known checkpoint before continuing.
+To compare explicit gradient materialization and individual norm reductions with the optimized defaults, set both `native_gradient_scale=False` and `batched_norm=False`. Numerical safeguards remain active in either configuration.
 
 ## Mixed precision and gradient accumulation
 
@@ -385,7 +402,15 @@ scheduler.load_state_dict(checkpoint["scheduler"])
 scaler.load_state_dict(checkpoint["scaler"])
 ```
 
-The versioned optimizer checkpoint includes clipping policy, AdaGC warmup/history, precision policy, master weights and native overrides. Saved policy takes precedence over destination index and module defaults on resume; loaded overrides are independently owned. Public save/load hooks run once around the complete native and clipping checkpoint. The optional `optimizer.load_state_dict(state, move_to_device=False)` defers native state migration until the first step. Old checkpoints without the AdaGC schema restore global clipping. Construct a fresh optimizer to change clipping strategy. Rebuild identical group/parameter order: same-shaped unnamed parameters swapped within a group cannot be detected automatically. Standalone historical `exp_avg` checkpoints are not migrated.
+The versioned optimizer checkpoint stores clipping policy, AdaGC warmup/history, precision settings, master weights, strict-arithmetic flags and resolved native overrides. Saved policy takes precedence over destination index and module defaults. Each resumed optimizer owns its override dictionaries; loading one checkpoint into several optimizers does not tie their policies together. A later parameter-specific `manager.override_config(...)` call can change the resumed policy.
+
+Public save/load hooks run once around the complete native and AdaGC checkpoint. Loading clears step diagnostics. Native state moves to the parameter device by default. To defer that transfer until the first optimizer step, use:
+
+```python
+optimizer.load_state_dict(checkpoint["optimizer"], move_to_device=False)
+```
+
+Construct a fresh optimizer to change clipping strategy. Preserve group and parameter order when resuming: swapping unnamed, same-shaped parameters cannot be detected automatically. Checkpoints without the AdaGC schema restore global clipping; standalone `exp_avg` checkpoints are not migrated.
 
 A complete training restart also needs RNG states, data/sampler position and any partial accumulated gradients. The small example above saves optimizer-related state, not those application-specific pieces. The integration suite verifies controlled fresh-process continuation around the warmup boundary; arbitrary DataLoader worker restarts remain unverified.
 
@@ -408,7 +433,18 @@ Unused parameters may have no state yet. AdaGC diagnostics contain raw norms, ap
 
 `lionplus8bit.diagnostics.compare_signs(candidate, control, clipped_gradients)` compares momentum error and the next sign decision. Use matching parameter order and replay history, with identical **already-clipped** gradients. The diagnostic allocates decoded temporaries and synchronizes; keep it outside timed intervals. Freely evolving training runs do not isolate quantization because their gradients differ.
 
-`optimizer.last_step_stats` describes the latest completed update with active, clipped, tiny, strict, and recovered-norm tensor counts. AMP skips leave these diagnostics unchanged.
+`optimizer.last_step_stats` describes the latest completed update under either clipping policy:
+
+```python
+stats = optimizer.last_step_stats
+if stats is not None:
+    print("Active tensors:", stats["active_tensors"])
+    print("Clipped tensors:", stats["clipped_tensors"])
+    print("Strict arithmetic:", stats["strict_tensors"])
+    print("FP64 norm recovery:", stats["norm_recovery_tensors"])
+```
+
+The dictionary also contains `tiny_tensors`. AMP skips leave the previous diagnostics unchanged, so check whether an update completed before recording a new data point.
 
 For a reproducible synthetic CUDA benchmark:
 
@@ -450,22 +486,23 @@ AMP output separates forward/backward, unscale, finite stress-input conditioning
 
 ## Validation and limitations
 
-The initial validation run used a Quadro RTX 6000 (SM75), Python 3.12.3, NVIDIA PyTorch 2.13 alpha, CUDA runtime 13.3 and bitsandbytes 0.50.2. The loader selected its CUDA 13.2 binary. These results describe that environment, not every supported PyTorch/backend combination.
+Local validation used a Quadro RTX 6000 (SM75), Python 3.12.3, NVIDIA PyTorch 2.13 alpha, CUDA runtime 13.3 and bitsandbytes 0.50.2. The loader selected its CUDA 13.2 binary. These results describe that environment; they do not cover every supported PyTorch/backend combination.
 
 | Check | Observed result |
 | --- | --- |
-| Final installed-wheel regression suite | 79 tests passed, plus 15 subtests |
-| CPU-only collection | 50 passed, 29 CUDA tests deselected |
-| Independent CUDA integration | Six groups passed, including bitwise fresh-process AdaGC resume |
-| Build and packaging | Wheel/sdist, strict metadata checks and isolated-wheel usage passed |
+| Full suite with CUDA required | 172 tests and 15 subtests passed |
+| Installed-wheel CPU suite | 113 tests and 15 subtests passed; 59 CUDA tests deselected |
+| Independent CUDA integration | Six groups passed, including controlled fresh-process resume |
+| Checkpoint controls | Six CPU AMP restart splits and twelve same-dtype precision cases matched uninterrupted execution bitwise |
+| Replay/AMP benchmark matrix | 72 process runs and 1,800 timed updates completed without overflow skips |
+| Build and packaging | Wheel/sdist, strict metadata checks and installed-wheel usage passed |
 | AdaGC vs global application quality | Inconclusive against a 2% relative validation-loss margin |
-| AdaGC optimizer-only replay latency | About 1.03–2.21 times global-clipping latency across tested FP32 cases |
-| Additional peak allocated memory in those cases | 5,632–30,208 bytes |
-| Matched-gradient uint8 vs FP32 momentum replay | 1.044% sign disagreement on one 100-update replay |
 
-The application comparison used three paired seeds, 1,100 updates per arm and a small real-audio subset with a custom training loop. AdaGC's mean relative validation loss was **+0.965%**, with a 95% interval of **−1.272% to +3.201%**. That interval does not establish noninferiority at the declared +2% margin. Short runs without loss spikes do not establish long-term stability. Neither the quality study nor the microbenchmarks support a universal quality or speed claim.
+A focused AMP memory probe used FP32 `Linear(1024,1024)` weights with uint8 momentum, FP16 autocast, GradScaler and an auxiliary scalar parameter. After initialization, the ordinary, zero-auxiliary-gradient and post-tiny-gradient conditions each needed **7,168 bytes of additional peak allocated memory** during the measured optimizer/scaler steps. This figure applies to that probe. A large tensor that itself needs strict arithmetic or FP64 recovery has different temporary-memory costs.
 
-Read the [full validation report](docs/validation-adagc.md) and [portable raw evidence](docs/evidence/adagc/README.md) for methods, commands, corrected timing results and limitations. The repository does not include application audio, model-source dependencies or trained checkpoints; synthetic tests and benchmarks need no application dataset.
+The application comparison used three paired seeds, 1,100 updates per arm and a small real-audio subset with a custom training loop. AdaGC's mean relative validation loss was **+0.965%**, with a 95% interval of **−1.272% to +3.201%**. That interval does not establish noninferiority at the declared +2% margin. Short runs without loss spikes do not establish long-term stability. AdaGC adds per-tensor history and clipping work; measure its training-time cost alongside task quality.
+
+The [validation report](docs/validation-audit-fixes.md) and [raw results and reproduction commands](docs/evidence/audit-fixes-2026-11-11/README.md) describe the tests, memory probe, matched study and benchmark matrix. The repository does not include application audio, model-source dependencies or trained checkpoints. Synthetic tests and benchmarks need no application dataset.
 
 | Configuration | Status |
 | --- | --- |
