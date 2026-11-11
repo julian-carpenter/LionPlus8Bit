@@ -7,7 +7,8 @@ Requires bitsandbytes >= 0.50.2 and its supported PyTorch/backend environment.
 from __future__ import annotations
 
 import struct
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from copy import deepcopy
 import math
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -16,7 +17,8 @@ import bitsandbytes as bnb
 import torch
 from packaging.version import Version
 from torch import Tensor
-from ._numerical_guard import has_tiny_values, tiny_value_flag
+from ._numerical_guard import tiny_value_flag
+from ._strict import strict_update
 from ._clipping import ClippingConfig, ClippingState, prepare_clipping, commit_clipping
 
 __all__ = ["LionPlus8bit"]
@@ -91,6 +93,7 @@ class LionPlus8bit(bnb.optim.Lion8bit):
         )
         self._clipping_state = None
         self.last_clipping = None
+        self.last_step_stats = None
         self._initial_max_grad_norm = float(max_grad_norm)
         self._clip_scale: Tensor | None = None
         self.batched_norm = batched_norm
@@ -134,8 +137,73 @@ class LionPlus8bit(bnb.optim.Lion8bit):
         if param_group["max_grad_norm"] != current and self.param_groups:
             raise ValueError("All parameter groups must use the same max_grad_norm")
         super().add_param_group(param_group)
+        group_index = len(self.param_groups) - 1
+        for parameter_index in range(len(self.param_groups[group_index]["params"])):
+            self._effective_override(group_index, parameter_index)
         if self._clipping_state is not None:
             self._clipping_state.resize(sum(len(g["params"]) for g in self.param_groups))
+
+    def _effective_override(self, group_index, parameter_index):
+        """Own resolved defaults; accept subsequent parameter-specific manager updates."""
+        if not hasattr(self, "_parameter_overrides"):
+            self._parameter_overrides = {}
+            self._manager_overrides = {}
+            self._saved_override_params = set()
+        manager = bnb.optim.GlobalOptimManager.get_instance()
+        p = self.param_groups[group_index]["params"][parameter_index]
+        observed = manager.pid2config.get(id(p), {})
+        if p not in self._parameter_overrides:
+            self._parameter_overrides[p] = deepcopy(
+                manager.index2config.get((group_index, parameter_index), {})
+            )
+            self._manager_overrides[p] = {}
+        effective = self._parameter_overrides[p]
+        # Module registrations are defaults for parameters awaiting allocation. They
+        # must not replace a checkpoint policy, or mutate another optimizer's index map.
+        if p not in self._saved_override_params and not self.state.get(p):
+            for module, attr, config in manager.module_weight_config_triple:
+                if getattr(module, attr) is p:
+                    effective.update(deepcopy(config))
+            effective.update(deepcopy(observed))
+        else:
+            previous = self._manager_overrides[p]
+            for key, value in observed.items():
+                if key not in previous or value != previous[key]:
+                    effective[key] = deepcopy(value)
+        self._manager_overrides[p] = deepcopy(observed)
+        return effective
+
+    def check_overrides(self):
+        for gi, group in enumerate(self.param_groups):
+            for pi in range(len(group["params"])):
+                self._effective_override(gi, pi)
+
+    def get_config(self, gindex, pindex, group):
+        # Match the pinned native defaults, with an optimizer-owned override merge.
+        config = {key: group[key] for key in ("betas", "eps", "weight_decay", "lr")}
+        config.update(
+            alpha=group.get("alpha", 0.0),
+            t_alpha=group.get("t_alpha"),
+            t_beta3=group.get("t_beta3"),
+            optim_bits=self.args.optim_bits,
+            min_8bit_size=self.args.min_8bit_size,
+            max_unorm=self.args.max_unorm,
+            skip_zeros=self.args.skip_zeros,
+        )
+        config.update(self._effective_override(gindex, pindex))
+        return config
+
+    @contextmanager
+    def _without_checkpoint_hooks(self, operation):
+        names = [f"_optimizer_{operation}_{when}_hooks" for when in ("pre", "post")]
+        saved = [getattr(self, name) for name in names]
+        try:
+            for name in names:
+                setattr(self, name, {})
+            yield
+        finally:
+            for name, hooks in zip(names, saved):
+                setattr(self, name, hooks)
 
     def _validate_groups(self) -> float:
         max_norm = self.param_groups[0]["max_grad_norm"]
@@ -165,6 +233,8 @@ class LionPlus8bit(bnb.optim.Lion8bit):
                 raise RuntimeError("LionPlus8bit requires float32, float16 or bfloat16 dtype")
 
         device = params[0].device
+        if any(p.device != device for group in self.param_groups for p in group["params"]):
+            raise RuntimeError("Use one optimizer per device, including inactive parameters")
         for p in params:
             if not p.is_contiguous():
                 raise RuntimeError(
@@ -172,8 +242,37 @@ class LionPlus8bit(bnb.optim.Lion8bit):
                 )
             if p.device != device:
                 raise RuntimeError("Use one optimizer per device")
+        layouts = getattr(self, "_parameter_layouts", {})
+        parameter_storages = {
+            (p.device, p.untyped_storage().data_ptr())
+            for group in self.param_groups
+            for p in group["params"]
+            if p.numel()
+        }
+        ranges = {}
+        for group in self.param_groups:
+            for p in group["params"]:
+                if p.numel() and p.is_contiguous():
+                    key = (p.device, p.untyped_storage().data_ptr())
+                    start = p.storage_offset() * p.element_size()
+                    ranges.setdefault(key, []).append((start, start + p.numel() * p.element_size()))
+        for intervals in ranges.values():
+            intervals.sort()
+            if any(left[1] > right[0] for left, right in zip(intervals, intervals[1:])):
+                raise RuntimeError("Parameter storage ranges must not overlap")
+        for p in params:
+            if id(p) in layouts and layouts[id(p)] != (p.dtype, p.device):
+                raise RuntimeError("Live parameter dtype/device changes require a fresh optimizer")
+            if (
+                p.grad.numel()
+                and (p.grad.device, p.grad.untyped_storage().data_ptr()) in parameter_storages
+            ):
+                raise RuntimeError("Parameter and gradient storage must not overlap")
+            layouts[id(p)] = (p.dtype, p.device)
+        self._parameter_layouts = layouts
         if not self.initialized:
             self.check_overrides()
+            self.to_gpu()  # Guards consume native state, including deferred CPU checkpoints.
         for gi, group in enumerate(self.param_groups):
             for pi, p in enumerate(group["params"]):
                 if p.grad is None:
@@ -196,6 +295,7 @@ class LionPlus8bit(bnb.optim.Lion8bit):
         norm_value = float(total_norm)
         # Rare FP64 path covers overflow, underflow and poorly resolved squared norms.
         self._wide_clip = not math.isfinite(norm_value) or norm_value < 1e-18
+        norm_recovery_count = len(params) if self._wide_clip else 0
         if self._wide_clip:
             total_norm = torch.linalg.vector_norm(
                 torch.stack([torch.linalg.vector_norm(g, dtype=torch.float64) for g in gradients])
@@ -228,7 +328,23 @@ class LionPlus8bit(bnb.optim.Lion8bit):
         # momentum scales so decay/cancellation cannot silently re-enter FTZ math.
         cutoff = 1e-20
         scale_value = max_norm / norm_value if self._needs_clip else 1.0
-        self._subnormal |= has_tiny_values(params, self.state, cutoff / scale_value)
+        guard = (
+            tiny_value_flag(
+                params,
+                self.state,
+                torch.full(
+                    (len(params),),
+                    float("inf")
+                    if cutoff / scale_value > torch.finfo(torch.float32).max
+                    else cutoff / scale_value,
+                    device=device,
+                ),
+            )
+            .cpu()
+            .tolist()
+        )
+        tiny_by_id = {id(p): bool(tiny) for p, tiny in zip(params, guard)}
+        global_subnormal = self._subnormal
         try:
             if not self.initialized:
                 self.check_overrides()
@@ -241,11 +357,19 @@ class LionPlus8bit(bnb.optim.Lion8bit):
                     if not self.state[p]:
                         self.init_state(group, p, gi, pi)
                     self.prefetch_state(p)
+                    self._subnormal = global_subnormal or tiny_by_id[id(p)]
                     self.update_step(group, p, gi, pi)
             if self.is_paged and device.type == "cuda":
                 torch.cuda.synchronize(device)
         finally:
             self._clip_scale = None
+        self.last_step_stats = dict(
+            active_tensors=len(params),
+            clipped_tensors=len(params) if self._needs_clip else 0,
+            strict_tensors=sum(bool(self.state[p].get("strict_math", False)) for p in params),
+            tiny_tensors=sum(tiny_by_id.values()),
+            norm_recovery_tensors=norm_recovery_count,
+        )
         return loss
 
     def _adagc_step(self, params, gradients, norms, max_norm, loss):
@@ -258,24 +382,34 @@ class LionPlus8bit(bnb.optim.Lion8bit):
         state.resize(len(all_params))
         slot_map = {id(p): i for i, p in enumerate(all_params)}
         slots = [slot_map[id(p)] for p in params]
-        plan = prepare_clipping(norms, slots, self.clipping_config, state, max_norm)
-        guard = tiny_value_flag(params, self.state, (1e-20 / plan.scales).float())
-        # Single ordinary-path readback: norms, scales, candidate history, readiness, guard.
-        packed = state.pack(norms, plan, guard)
-        if any(not math.isfinite(row[0]) or row[0] < 1e-18 for row in packed):
-            # Rare exact norm recovery distinguishes nonfinite input and finite reduction overflow.
-            norms = torch.stack(
-                [torch.linalg.vector_norm(g, dtype=torch.float64) for g in gradients]
-            )
+        plan = prepare_clipping(
+            norms, slots, self.clipping_config, state, max_norm, validate_norms=False
+        )
+        guard, nonzero = tiny_value_flag(
+            params, self.state, (1e-20 / plan.scales).float(), return_nonzero=True
+        )
+        packed = state.pack(norms, plan, guard, nonzero)
+        suspect = [
+            i
+            for i, row in enumerate(packed)
+            if not math.isfinite(row[0]) or (row[0] < 1e-18 and row[5])
+        ]
+        if suspect:
+            norms = norms.double()
+            for i in suspect:
+                norms[i] = torch.linalg.vector_norm(gradients[i], dtype=torch.float64)
             if not bool(torch.isfinite(norms).all()):
                 raise RuntimeError("LionPlus8bit encountered a non-finite AdaGC gradient norm")
             plan = prepare_clipping(norms, slots, self.clipping_config, state, max_norm)
-            guard = tiny_value_flag(params, self.state, (1e-20 / plan.scales).float())
-            packed = state.pack(norms, plan, guard)
+            guard, nonzero = tiny_value_flag(
+                params, self.state, (1e-20 / plan.scales).float(), return_nonzero=True
+            )
+            packed = state.pack(norms, plan, guard, nonzero)
         if any(not math.isfinite(row[2]) for row in packed):
             raise RuntimeError("Non-finite AdaGC history")
-        for n, scale, _, _, _ in packed:
-            if n > 0 and (scale <= 0 or (scale < 1 and scale * n < 2**-149)):
+        for row in packed:
+            n, scale = row[:2]
+            if n > 0 and (scale <= 0 or (row[6] < n and row[6] < 2**-149)):
                 raise ValueError("AdaGC clipping threshold is below FP32 gradient representability")
         plan.host = [row[1:4] for row in packed]
         self._adagc_observed = {}
@@ -289,7 +423,8 @@ class LionPlus8bit(bnb.optim.Lion8bit):
                 for pi, p in enumerate(group["params"]):
                     if p.grad is None:
                         continue
-                    i, (norm, scale, _, _, tiny) = decisions[id(p)]
+                    i, row = decisions[id(p)]
+                    norm, scale, _, _, tiny = row[:5]
                     self._clip_scale = plan.scales[i]
                     self._needs_clip = scale < 1
                     self._wide_clip = scale < torch.finfo(torch.float32).tiny or norm < 1e-18
@@ -314,6 +449,13 @@ class LionPlus8bit(bnb.optim.Lion8bit):
                 plan.candidates, plan.ready, plan.host = corrected.candidates, corrected.ready, None
             commit_clipping(state, plan)
             self._clipping_state = state
+            self.last_step_stats = dict(
+                active_tensors=len(params),
+                clipped_tensors=sum(row[1] < 1 for row in packed),
+                strict_tensors=sum(bool(self.state[p].get("strict_math", False)) for p in params),
+                tiny_tensors=sum(bool(row[4]) for row in packed),
+                norm_recovery_tensors=len(suspect),
+            )
             self.last_clipping = dict(
                 norms=[row[0] for row in packed],
                 scales=[row[1] for row in packed],
@@ -327,7 +469,10 @@ class LionPlus8bit(bnb.optim.Lion8bit):
         return loss
 
     def state_dict(self):
-        result = super().state_dict()
+        for hook in self._optimizer_state_dict_pre_hooks.values():
+            hook(self)
+        with self._without_checkpoint_hooks("state_dict"):
+            result = super().state_dict()
         result["lionplus_config"] = dict(
             version=2,
             clipping=self.clipping,
@@ -341,10 +486,7 @@ class LionPlus8bit(bnb.optim.Lion8bit):
             native_gradient_scale=self.native_gradient_scale,
             batched_norm=self.batched_norm,
             overrides=[
-                [
-                    dict(self.mng.pid2config.get(id(p), self.mng.index2config.get((gi, pi), {})))
-                    for pi, p in enumerate(g["params"])
-                ]
+                [deepcopy(self._effective_override(gi, pi)) for pi in range(len(g["params"]))]
                 for gi, g in enumerate(self.param_groups)
             ],
         )
@@ -358,9 +500,18 @@ class LionPlus8bit(bnb.optim.Lion8bit):
                 group_lengths=[len(g["params"]) for g in self.param_groups],
                 shapes=[tuple(p.shape) for g in self.param_groups for p in g["params"]],
             )
+        for hook in self._optimizer_state_dict_post_hooks.values():
+            replacement = hook(self, result)
+            if replacement is not None:
+                result = replacement
         return result
 
     def load_state_dict(self, state_dict, move_to_device=True):
+        state_dict = state_dict.copy()
+        for hook in self._optimizer_load_state_dict_pre_hooks.values():
+            replacement = hook(self, state_dict)
+            if replacement is not None:
+                state_dict = replacement
         config = state_dict.get("lionplus_config")
         # Validate incoming groups before changing overrides, allocation policy,
         # native state or clipping state. The base loader assigns groups eagerly.
@@ -458,20 +609,36 @@ class LionPlus8bit(bnb.optim.Lion8bit):
                 or self.master_weights != config["master_weights"]
             ):
                 raise ValueError("Load changed allocation policy into a fresh optimizer")
+        with self._without_checkpoint_hooks("load_state_dict"):
+            super().load_state_dict(state_dict, move_to_device=move_to_device)
+        if config is not None:
             self.args.min_8bit_size = config["min_8bit_size"]
             self.is_paged = config["is_paged"]
             self.master_weights = config["master_weights"]
             self.native_gradient_scale = config["native_gradient_scale"]
             self.batched_norm = config.get("batched_norm", False)
-            for group, overrides in zip(self.param_groups, config.get("overrides", [])):
-                for p, override in zip(group["params"], overrides):
-                    self.mng.pid2config[id(p)] = override
-        super().load_state_dict(state_dict, move_to_device=move_to_device)
+        self._parameter_overrides = {}
+        self._manager_overrides = {}
+        self._saved_override_params = set()
+        overrides = config.get("overrides", []) if config else []
+        for gi, group in enumerate(self.param_groups):
+            for pi, p in enumerate(group["params"]):
+                override = overrides[gi][pi] if overrides else {}
+                self._parameter_overrides[p] = deepcopy(override)
+                self._manager_overrides[p] = deepcopy(override)
+                self._saved_override_params.add(p)
+                # A separate owned dictionary lets the public manager update this
+                # parameter after loading without aliasing a checkpoint or peer.
+                self.mng.pid2config[id(p)] = deepcopy(override)
         self.clipping_config = clipping_config
         self._clipping_state = restored
         self.last_clipping = None
+        self.last_step_stats = None
         self._validate_groups()
         self.initialized = False
+        self._parameter_layouts = {}
+        for hook in self._optimizer_load_state_dict_post_hooks.values():
+            hook(self)
 
     @torch.no_grad()
     def update_step(self, group, p, gindex, pindex):
@@ -520,41 +687,7 @@ class LionPlus8bit(bnb.optim.Lion8bit):
         try:
             if strict:
                 state["strict_math"] = True
-                momentum = state["state1"]
-                if momentum.dtype == torch.uint8:
-                    momentum = (
-                        state["qmap1"][momentum.long()].reshape(-1)
-                        * state["absmax1"].repeat_interleave(256)[: momentum.numel()]
-                    ).reshape_as(p)
-                beta1, beta2 = config["betas"]
-                direction = (momentum * beta1 + grad.float() * (1 - beta1)).sign()
-                target.mul_(1 - config["lr"] * config["weight_decay"]).add_(
-                    direction, alpha=-config["lr"]
-                )
-                momentum = momentum * beta2 + grad.float() * (1 - beta2)
-                if state["state1"].dtype == torch.uint8:
-                    peak = momentum.abs().max()
-                    divisor = torch.where(peak > 0, peak, torch.ones_like(peak))
-                    normalized = (momentum / divisor).contiguous()
-                    if current is not None and current != default:
-                        default.wait_stream(current)
-                    context = torch.cuda.stream(default) if default is not None else nullcontext()
-                    with context:
-                        quantized, quant = bnb.functional.quantize_blockwise(
-                            normalized, code=state["qmap1"], blocksize=256
-                        )
-                    if current is not None:
-                        if current != default:
-                            current.wait_stream(default)
-                        normalized.record_stream(default)
-                        state["qmap1"].record_stream(default)
-                        quantized.record_stream(current)
-                        quant.absmax.record_stream(current)
-                    state["state1"].copy_(quantized)
-                    state["absmax1"].copy_(quant.absmax * divisor)
-                else:
-                    state["state1"].copy_(momentum)
-                state["step"] += 1
+                strict_update(target, grad, state, config, current, default)
             elif use_master or use_scale:
                 if current is not None:
                     if current != default:

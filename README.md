@@ -6,7 +6,7 @@
 
 LionPlus8Bit combines Lion's signed updates, gradient clipping before momentum, and bitsandbytes' blockwise momentum quantization. Optimized execution is the default. Global clipping is the default policy; AdaGC is an option for clipping each parameter tensor against its own recent gradient history.
 
-The package is an early release. It saves optimizer-state memory, but task quality and speed depend on your workload. In the latest local validation, 79 tests and six independent CUDA integration groups passed. AdaGC's three-seed application quality comparison was inconclusive, and it increased optimizer-only latency in the tested replay matrix. See [validation](#validation-and-limitations) before choosing a policy.
+The package is an early release. It saves optimizer-state memory, but task quality and speed depend on your workload. The [corrective validation](docs/validation-audit-fixes.md) passed 172 tests, 15 subtests and six independent CUDA integration groups, including new AMP, checkpoint and numerical fallback regressions. AdaGC's three-seed application quality comparison was inconclusive, and it increased optimizer-only latency in the tested replay matrix. See [validation](#validation-and-limitations) before choosing a policy.
 
 ## Contents
 
@@ -169,7 +169,7 @@ This package defines edge cases beyond the paper's equations:
 - Zero warmup norms do not reduce history to zero, which would otherwise suppress future gradients permanently.
 - A tensor first activated after warmup receives one per-tensor absolute bootstrap clip, then seeds its history from the clipped norm. This also defines zero-length warmup.
 - `grad=None` leaves that tensor's history unchanged. An active zero gradient can still trigger momentum and weight-decay updates. Established histories decay on zero observations and become unseeded below FP32 work representability.
-- An explicit zero branch replaces a fixed denominator epsilon. Tiny and extreme values use the numerical fallback paths.
+- An explicit zero branch replaces a fixed denominator epsilon. Tiny and extreme values use per-tensor numerical fallback paths.
 
 The linked Paddle and author PyTorch reference implementations differ in warmup counting, raw versus clipped warmup history, and epsilon. This implementation uses exactly 100 steps by default and clipped history with the zero recovery above. See the [design and implementation record](docs/superpowers/plans/2026-11-11-adagc.md) for those decisions.
 
@@ -194,7 +194,7 @@ for momentum codes and scales, plus its share of a codebook. FP32 momentum uses 
 
 One million eligible elements therefore use about 1.02 MB of momentum payload instead of 4 MB. Gradients, model weights, activations, temporary buffers, and allocator reserves still occupy memory. A roughly 75% momentum reduction does not mean 75% less total training VRAM.
 
-With actual FP16/BF16 parameters, the default FP32 master weights add another $4N$ bytes for those parameters. FP32 parameters with autocast avoid this extra master copy. AdaGC adds packed FP32 history per tensor, masks, cached indices and readback storage; small metadata vectors use FP64 arithmetic and rare histories use FP64 exceptions. There is no ordinary parameter-sized FP32 shadow momentum for quantized tensors.
+With actual FP16/BF16 parameters, the default FP32 master weights add another $4N$ bytes for those parameters. FP32 parameters with autocast avoid this extra master copy. AdaGC adds packed FP32 history per tensor, masks, cached indices and readback storage; small metadata vectors use FP64 arithmetic and rare histories use FP64 exceptions. There is no ordinary parameter-sized FP32 shadow momentum for quantized tensors. Strict arithmetic is selected per affected tensor and remains conservative across checkpoints. Strict uint8 updates decode/requantize momentum in chunks of at most 65,536 elements with independent 256-element block scales. This bounds momentum scratch; clipping and flattening a strided gradient can still allocate a full gradient temporary. Old checkpoints with conservative `strict_math` flags retain those flags for numerical continuity.
 
 Quantization introduces error, including possible sign changes near zero. Use FP32 controls and your own validation metric to decide whether the memory savings suit your task.
 
@@ -248,7 +248,9 @@ LionPlus8bit(
 )
 ```
 
-`params` accepts parameters or PyTorch parameter-group dictionaries. Active parameters must share one device and use contiguous storage; noncontiguous gradients are supported. Groups can have different Lion LR, betas and decay, but must share the clipping policy/settings and absolute threshold.
+`params` accepts parameters or PyTorch parameter-group dictionaries. All registered parameters must share one device; active parameters must use contiguous storage; noncontiguous gradients are supported. Groups can have different Lion LR, betas and decay, but must share the clipping policy/settings and absolute threshold.
+
+Parameter and gradient storage must be separate, and distinct parameters must not overlap. Changing a parameter's dtype or device after stepping requires a fresh optimizer; move/cast the model before constructing it. Disjoint contiguous parameter views are accepted.
 
 Optimized defaults batch norm calculations and pass scale values to native kernels when the precision guard permits it. The pinned native API accepts host floats, so AdaGC reads back a packed coefficient vector rather than one GPU scalar per tensor. It is an eager implementation with host synchronization, not a fully fused device-only optimizer.
 
@@ -355,7 +357,7 @@ manager = bnb.optim.GlobalOptimManager.get_instance()
 manager.override_config(model.weight, "optim_bits", 32)  # For the Linear model above.
 ```
 
-The manager is process-wide. Avoid unrelated overrides in controlled comparisons and inspect actual state dtypes after initialization. Overrides such as `skip_zeros` and `max_unorm` change the update contract and are rejected.
+The manager is process-wide. Each optimizer owns its resolved effective overrides, including module precision defaults for dynamically added groups. A later parameter-specific `manager.override_config(...)` call updates that optimizer's policy. Avoid unrelated index registrations in controlled comparisons and inspect actual state dtypes after initialization. Overrides such as `skip_zeros` and `max_unorm` change the update contract and are rejected.
 
 ## Checkpoints and resuming
 
@@ -383,7 +385,7 @@ scheduler.load_state_dict(checkpoint["scheduler"])
 scaler.load_state_dict(checkpoint["scaler"])
 ```
 
-The versioned optimizer checkpoint includes clipping policy, AdaGC warmup/history, precision policy, master weights and native overrides. Saved policy takes precedence on resume; old checkpoints without the AdaGC schema restore global clipping. Construct a fresh optimizer to change clipping strategy. Rebuild identical group/parameter order: same-shaped unnamed parameters swapped within a group cannot be detected automatically. Standalone historical `exp_avg` checkpoints are not migrated.
+The versioned optimizer checkpoint includes clipping policy, AdaGC warmup/history, precision policy, master weights and native overrides. Saved policy takes precedence over destination index and module defaults on resume; loaded overrides are independently owned. Public save/load hooks run once around the complete native and clipping checkpoint. The optional `optimizer.load_state_dict(state, move_to_device=False)` defers native state migration until the first step. Old checkpoints without the AdaGC schema restore global clipping. Construct a fresh optimizer to change clipping strategy. Rebuild identical group/parameter order: same-shaped unnamed parameters swapped within a group cannot be detected automatically. Standalone historical `exp_avg` checkpoints are not migrated.
 
 A complete training restart also needs RNG states, data/sampler position and any partial accumulated gradients. The small example above saves optimizer-related state, not those application-specific pieces. The integration suite verifies controlled fresh-process continuation around the warmup boundary; arbitrary DataLoader worker restarts remain unverified.
 
@@ -406,6 +408,8 @@ Unused parameters may have no state yet. AdaGC diagnostics contain raw norms, ap
 
 `lionplus8bit.diagnostics.compare_signs(candidate, control, clipped_gradients)` compares momentum error and the next sign decision. Use matching parameter order and replay history, with identical **already-clipped** gradients. The diagnostic allocates decoded temporaries and synchronizes; keep it outside timed intervals. Freely evolving training runs do not isolate quantization because their gradients differ.
 
+`optimizer.last_step_stats` describes the latest completed update with active, clipped, tiny, strict, and recovered-norm tensor counts. AMP skips leave these diagnostics unchanged.
+
 For a reproducible synthetic CUDA benchmark:
 
 ```bash
@@ -420,11 +424,33 @@ python tools/benchmark_clipping.py \
   --output results/adagc.json
 ```
 
-Use a fresh output path; the tool refuses overwrite. Add `--profile` for a Chrome trace. It reports synchronized wall/CUDA samples, median/p95, and allocated/reserved memory peaks. `--warmup` is timing warmup and must be at least 100; it differs from `adagc_warmup_steps`. Measure end-to-end training as well as optimizer-only time, and distinguish initialization from steady state.
+For balanced repeated comparisons that preserve every command and rotate arm order:
+
+```bash
+python tools/run_benchmark_campaign.py \
+  --cases ordinary zero recovery --modes replay amp \
+  --strategies global adagc native --repeats 3 \
+  --output-dir results/benchmark-campaign
+```
+
+Use `--quick` for six short replay smoke runs. The native control has no Lion+ clipping, and synthetic measurements do not establish task quality.
+
+Use a fresh output path; the tool refuses overwrite. Add `--profile` for a Chrome trace. It reports synchronized wall/CUDA samples, median/p95, and allocated/reserved memory peaks. `--warmup` is timing warmup and must be at least 100; it differs from `adagc_warmup_steps`. Measure end-to-end training as well as optimizer-only time, and distinguish initialization from steady state. The benchmark also supports `--case zero|tiny|recovery|strided|variable-active`, `--stream nondefault`, and `--repeats 3`. Outputs include spike/nonspike and path-conditioned distributions, each raw update, persistent state bytes, and temporary allocated peaks.
+
+To benchmark FP32 parameters with actual FP16 autocast and GradScaler:
+
+```bash
+python tools/benchmark_clipping.py \
+  --strategy adagc --layout few-large --mode amp --dtype float16 \
+  --case recovery --pattern localized --repeats 3 \
+  --warmup 150 --steps 500 --output results/amp-recovery.json
+```
+
+AMP output separates forward/backward, unscale, finite stress-input conditioning, optimizer and scaler-update timing. Conditioning deliberately injects the selected finite test pattern after unscale; this is an instrumented stress benchmark. `--strategy native` measures unclipped bitsandbytes Lion8bit as a backend baseline, which has different clipping semantics. Native BF16 performance mode requires hardware support.
 
 ## Validation and limitations
 
-The latest local run used a Quadro RTX 6000 (SM75), Python 3.12.3, NVIDIA PyTorch 2.13 alpha, CUDA runtime 13.3 and bitsandbytes 0.50.2. The loader selected its CUDA 13.2 binary. These results describe that environment, not every supported PyTorch/backend combination.
+The initial validation run used a Quadro RTX 6000 (SM75), Python 3.12.3, NVIDIA PyTorch 2.13 alpha, CUDA runtime 13.3 and bitsandbytes 0.50.2. The loader selected its CUDA 13.2 binary. These results describe that environment, not every supported PyTorch/backend combination.
 
 | Check | Observed result |
 | --- | --- |
@@ -469,7 +495,7 @@ python -m ruff check .
 python -m ruff format --check .
 ```
 
-[CI](https://github.com/julian-carpenter/LionPlus8Bit/actions/workflows/ci.yml) runs on pushes and pull requests for Python 3.11 and 3.12. It builds distributions, installs the wheel, checks imports outside the checkout, runs CPU tests and both clipping examples, and uploads test/build artifacts. The badge covers this workflow. No PyPI publishing step is configured.
+[CI](https://github.com/julian-carpenter/LionPlus8Bit/actions/workflows/ci.yml) runs on pushes and pull requests for Python 3.11/3.12 with current CPU PyTorch, plus Python 3.10 with PyTorch 2.5.0 to enforce the declared minimum versions. It builds distributions, installs the wheel, checks imports outside the checkout, runs CPU tests and both clipping examples, and uploads test/build artifacts. The badge covers this workflow. No PyPI publishing step is configured.
 
 [CUDA validation](https://github.com/julian-carpenter/LionPlus8Bit/actions/workflows/cuda.yml) is a manual workflow for a trusted Linux x64 runner labeled `gpu` with CUDA PyTorch installed. It requires real CUDA, runs the regression suite, independent integration checks and examples, and uploads logs. `pytest` skips CUDA-marked tests without a GPU unless you supply `--require-cuda`, which fails instead. The unittest integration tool performs its own CUDA check and does not accept that pytest flag.
 

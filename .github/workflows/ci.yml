@@ -10,12 +10,18 @@ concurrency:
   cancel-in-progress: true
 jobs:
   tests:
-    name: CPU tests / Python ${{ matrix.python }}
+    name: CPU tests / Python ${{ matrix.python }} / ${{ matrix.torch }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        python: ['3.11', '3.12']
+        include:
+          - python: '3.10'
+            torch: 'torch==2.5.0'
+          - python: '3.11'
+            torch: 'torch'
+          - python: '3.12'
+            torch: 'torch'
     env:
       CUDA_VISIBLE_DEVICES: ''
       OMP_NUM_THREADS: '1'
@@ -30,7 +36,7 @@ jobs:
       - name: Install CPU PyTorch and build tools
         run: |
           python -m pip install --upgrade pip
-          python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install '${{ matrix.torch }}' --index-url https://download.pytorch.org/whl/cpu
           python -m pip install build twine "pytest>=8,<10" "ruff==0.17.4"
       - name: Build and check distributions
         run: |
