@@ -15,7 +15,9 @@ The build produced a wheel and source distribution; strict metadata/README check
 
 Local hardware/software: Quadro RTX 6000 (SM75), Python 3.12.3, NVIDIA PyTorch 2.13 alpha with CUDA 13.3, bitsandbytes 0.50.2 selecting its CUDA 13.2 binary. The environment supports numerical BF16 execution but lacks native BF16 hardware acceleration.
 
-The public-facing CI status badge represents hosted CPU/build checks. A separate manual workflow needs a trusted self-hosted CUDA runner. Check the actual Actions run for hosted results; a local pass is not evidence that a remote job ran.
+Hosted CI passed for Python 3.11 and 3.12 on the initial complete package commit: [run 42998523496](https://github.com/julian-carpenter/LionPlus8Bit/actions/runs/42998523496).
+
+The README CI status badge represents hosted CPU/build checks. A separate manual workflow needs a trusted self-hosted CUDA runner. Check the actual Actions run for hosted results; a local pass is not evidence that a remote job ran.
 
 ## Review changes
 

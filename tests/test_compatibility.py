@@ -1,6 +1,6 @@
 """Integration tests using real bitsandbytes kernels.
 
-Run: python -m unittest -v test_lion_plus_8bit.py
+Run: python -m pytest tests/test_compatibility.py
 Uses CUDA when available, otherwise the bitsandbytes CPU backend.
 """
 

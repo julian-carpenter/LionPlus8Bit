@@ -28,7 +28,7 @@ class Policies(unittest.TestCase):
             b.step()
             torch.testing.assert_close(p, q, rtol=0, atol=0)
 
-    def test_opt_in_paths(self):
+    def test_optimized_defaults_against_compatibility(self):
         p = torch.nn.Parameter(torch.ones(8192, device="cuda"))
         q = torch.nn.Parameter(p.detach().clone())
         a = LionPlus8bit([p], max_grad_norm=0.5, native_gradient_scale=False, batched_norm=False)
