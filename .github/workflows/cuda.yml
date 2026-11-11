@@ -1,0 +1,35 @@
+name: CUDA validation
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  cuda:
+    # Register a trusted runner with the gpu label before dispatching.
+    runs-on: [self-hosted, linux, x64, gpu]
+    timeout-minutes: 30
+    env:
+      CUBLAS_WORKSPACE_CONFIG: ':4096:8'
+      LION_RESULTS: ${{ runner.temp }}/lionplus8bit-integration-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install into isolated environment using runner CUDA PyTorch
+        run: |
+          python3 -m venv --system-site-packages .venv-ci
+          .venv-ci/bin/python -m pip install '.[dev]'
+          .venv-ci/bin/python -c "import torch; assert torch.cuda.is_available(), 'CUDA required; refusing CPU fallback'"
+      - name: Test all modes on CUDA
+        run: .venv-ci/bin/python -m pytest --require-cuda --junitxml=cuda-results.xml
+      - name: Independent CUDA integration and fresh-process restart
+        run: .venv-ci/bin/python tools/cuda_integration.py
+      - name: CUDA example
+        run: .venv-ci/bin/python examples/train_regression.py --device cuda
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: cuda-results
+          path: |
+            cuda-results.xml
+            ${{ env.LION_RESULTS }}/**/*.json
+            ${{ env.LION_RESULTS }}/**/*.log
+          if-no-files-found: ignore
