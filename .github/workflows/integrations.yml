@@ -1,0 +1,51 @@
+name: Training integrations
+on:
+  workflow_dispatch:
+    inputs:
+      transport:
+        description: NCCL transport selection
+        type: choice
+        options: [auto, host]
+        default: host
+permissions:
+  contents: read
+jobs:
+  multigpu:
+    runs-on: [self-hosted, linux, x64, gpu]
+    timeout-minutes: 45
+    env:
+      CUBLAS_WORKSPACE_CONFIG: ':4096:8'
+      OMP_NUM_THREADS: '1'
+      LION_RESULTS: results/integrations-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Install isolated package using runner CUDA PyTorch
+        run: |
+          python3 -m venv --system-site-packages .venv-integration
+          .venv-integration/bin/python -m pip install '.[dev]'
+          .venv-integration/bin/python -c "import torch; assert torch.cuda.device_count() >= 4, 'Four GPUs required'"
+      - name: Select explicit host transport
+        if: inputs.transport == 'host'
+        run: echo 'NCCL_P2P_DISABLE=1' >> "$GITHUB_ENV"
+      - name: Regression suite
+        run: |
+          .venv-integration/bin/python tools/training_integration.py --suite capabilities --output "$LION_RESULTS/capabilities"
+          .venv-integration/bin/python -m pytest --require-gpus 4 --require-cuda -q
+          LIONPLUS_LAYOUT_DEVICE=cuda .venv-integration/bin/python -m pytest tests/test_weight_layouts.py --require-cuda -q
+      - name: Two and four GPU DDP
+        run: |
+          .venv-integration/bin/python -m torch.distributed.run --standalone --nproc-per-node=2 tools/ddp_integration.py --output "$LION_RESULTS/ddp2"
+          .venv-integration/bin/python -m torch.distributed.run --standalone --nproc-per-node=4 tools/ddp_integration.py --output "$LION_RESULTS/ddp4"
+          .venv-integration/bin/python -m torch.distributed.run --standalone --nproc-per-node=4 tools/ddp_integration.py --channels-last --output "$LION_RESULTS/layout4"
+      - name: Unused parameters and delayed activation
+        run: |
+          .venv-integration/bin/python -m torch.distributed.run --standalone --nproc-per-node=2 tools/ddp_unused_integration.py --output "$LION_RESULTS/unused2"
+          .venv-integration/bin/python -m torch.distributed.run --standalone --nproc-per-node=4 tools/ddp_unused_integration.py --output "$LION_RESULTS/unused4"
+      - name: Four GPU checkpoint rollback
+        run: .venv-integration/bin/python tools/restart_integration.py --device cuda --world-size 4 --loader-workers 2 --fault-point after-step --output "$LION_RESULTS/restart4"
+      - uses: actions/upload-artifact@v7.0.2
+        if: always()
+        with:
+          name: training-integrations
+          path: results/integrations-*/**
+          if-no-files-found: warn

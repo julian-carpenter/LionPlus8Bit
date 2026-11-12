@@ -20,7 +20,7 @@ class Regressions(unittest.TestCase):
         )
 
     def test_layout_rejected_before_update(self):
-        p = torch.nn.Parameter(torch.ones(3, 4, device="cuda").t())
+        p = torch.nn.Parameter(torch.ones(3, 8, device="cuda")[:, ::2])
         o = LionPlus8bit([p])
         p.grad = torch.ones_like(p)
         with self.assertRaisesRegex(RuntimeError, "contiguous"):

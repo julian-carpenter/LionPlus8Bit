@@ -39,7 +39,7 @@ lionplus8bit = ["py.typed"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra --strict-markers"
-markers = ["cuda: requires a real CUDA-enabled PyTorch installation and visible NVIDIA GPU"]
+markers = ["cuda: requires CUDA", "multigpu: requires multiple GPUs", "paging: native paging capability", "compile: compilation integration", "fp8: FP8 integration", "slow: extended integration"]
 
 [tool.ruff]
 line-length = 100

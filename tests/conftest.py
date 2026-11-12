@@ -3,10 +3,14 @@ import torch
 
 
 def pytest_addoption(parser):
+    parser.addoption("--require-gpus", type=int, default=0, help="Require this many visible GPUs")
     parser.addoption("--require-cuda", action="store_true", help="Fail if CUDA is unavailable")
 
 
 def pytest_sessionstart(session):
+    required = session.config.getoption("--require-gpus")
+    if torch.cuda.device_count() < required:
+        raise pytest.UsageError(f"Requires {required} visible GPUs")
     if session.config.getoption("--require-cuda") and not torch.cuda.is_available():
         raise pytest.UsageError("CUDA is required; refusing a CPU fallback")
 

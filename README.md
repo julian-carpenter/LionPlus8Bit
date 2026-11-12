@@ -22,6 +22,7 @@ Use it when you want Lion-style updates with less momentum memory and clipping b
 - [Checkpoints and resuming](#checkpoints-and-resuming)
 - [Diagnostics and benchmarking](#diagnostics-and-benchmarking)
 - [Validation and limitations](#validation-and-limitations)
+- [Distributed training and recovery](#distributed-training-and-recovery)
 - [Development and CI](#development-and-ci)
 - [References and license](#references-and-license)
 
@@ -265,13 +266,13 @@ LionPlus8bit(
 )
 ```
 
-`params` accepts parameters or PyTorch parameter-group dictionaries. All registered parameters must share one device; active parameters must use contiguous storage; noncontiguous gradients are supported. Groups can have different Lion LR, betas and decay, but must share the clipping policy/settings and absolute threshold.
+`params` accepts parameters or PyTorch parameter-group dictionaries. All registered parameters must share one device. Dense nonoverlapping contiguous weights, channels-last/3d weights, and dense transposes/permutations are supported; noncontiguous gradients are supported too. Expanded or overlapping views and stepped slices are rejected. Groups can have different Lion LR, betas and decay, but must share the clipping policy/settings and absolute threshold.
 
-Parameter and gradient storage must be separate, and distinct parameters must not overlap. Changing a parameter's dtype or device after stepping requires a fresh optimizer; move/cast the model before constructing it. Disjoint contiguous parameter views are accepted.
+Parameter and gradient storage must be separate, and distinct parameters must not overlap. Changing a parameter's dtype or device after stepping requires a fresh optimizer; move/cast the model before constructing it. Disjoint contiguous parameter views are accepted. Construct the model with its final layout before stepping; changing an initialized layout requires a checkpoint load boundary or a fresh optimizer.
 
 Optimized defaults batch norm calculations and pass scale values to native kernels when the precision guard permits it. The pinned native API accepts host floats, so AdaGC reads back a packed coefficient vector rather than one GPU scalar per tensor. It is an eager implementation with host synchronization, not a fully fused device-only optimizer.
 
-`master_weights=True` maintains FP32 copies for actual FP16/BF16 parameters. Keep it enabled unless you deliberately accept rounding of small weight updates. `is_paged=True` exposes native paging, which remains unverified here.
+`master_weights=True` maintains FP32 copies for actual FP16/BF16 parameters. Keep it enabled unless you deliberately accept rounding of small weight updates. `is_paged=True` does not enable qualified managed-memory paging with the pinned backend. CUDA parameters with at least 100,000 elements would require an allocator ownership/release contract that bitsandbytes 0.50.2 does not provide, so the optimizer rejects those requests before any update. CPU and smaller buffers use ordinary storage. Use the default `is_paged=False`; 8-bit momentum savings remain available independently of paging.
 
 To compare explicit gradient materialization and individual norm reductions with the optimized defaults, set both `native_gradient_scale=False` and `batched_norm=False`. Numerical safeguards remain active in either configuration.
 
@@ -402,7 +403,7 @@ scheduler.load_state_dict(checkpoint["scheduler"])
 scaler.load_state_dict(checkpoint["scaler"])
 ```
 
-The versioned optimizer checkpoint stores clipping policy, AdaGC warmup/history, precision settings, master weights, strict-arithmetic flags and resolved native overrides. Saved policy takes precedence over destination index and module defaults. Each resumed optimizer owns its override dictionaries; loading one checkpoint into several optimizers does not tie their policies together. A later parameter-specific `manager.override_config(...)` call can change the resumed policy.
+Checkpoint schema v3 stores canonical logical row-major momentum/master values and parameter shape mapping, allowing continuation between supported weight layouts. Readers also accept schemas v1/v2. The versioned optimizer checkpoint stores clipping policy, AdaGC warmup/history, precision settings, master weights, strict-arithmetic flags and resolved native overrides. Saved policy takes precedence over destination index and module defaults. Each resumed optimizer owns its override dictionaries; loading one checkpoint into several optimizers does not tie their policies together. A later parameter-specific `manager.override_config(...)` call can change the resumed policy.
 
 Public save/load hooks run once around the complete native and AdaGC checkpoint. Loading clears step diagnostics. Native state moves to the parameter device by default. To defer that transfer until the first optimizer step, use:
 
@@ -412,7 +413,7 @@ optimizer.load_state_dict(checkpoint["optimizer"], move_to_device=False)
 
 Construct a fresh optimizer to change clipping strategy. Preserve group and parameter order when resuming: swapping unnamed, same-shaped parameters cannot be detected automatically. Checkpoints without the AdaGC schema restore global clipping; standalone `exp_avg` checkpoints are not migrated.
 
-A complete training restart also needs RNG states, data/sampler position and any partial accumulated gradients. The small example above saves optimizer-related state, not those application-specific pieces. The integration suite verifies controlled fresh-process continuation around the warmup boundary; arbitrary DataLoader worker restarts remain unverified.
+A complete training restart also needs RNG states, data/sampler position and any partial accumulated gradients. The small example above saves optimizer-related state, not those application-specific pieces. For full trainer recovery, the repository also provides a reference checkpoint helper and controlled failure/replay runner; see [distributed training and recovery](#distributed-training-and-recovery).
 
 ## Diagnostics and benchmarking
 
@@ -486,15 +487,15 @@ AMP output separates forward/backward, unscale, finite stress-input conditioning
 
 ## Validation and limitations
 
-Local validation used a Quadro RTX 6000 (SM75), Python 3.12.3, NVIDIA PyTorch 2.13 alpha, CUDA runtime 13.3 and bitsandbytes 0.50.2. The loader selected its CUDA 13.2 binary. These results describe that environment; they do not cover every supported PyTorch/backend combination.
+Local validation used four Quadro RTX 6000 GPUs (SM75), Python 3.12.3, NVIDIA PyTorch 2.13 alpha, CUDA runtime 13.3 and bitsandbytes 0.50.2. The loader selected its CUDA 13.2 binary. These results describe that environment; they do not cover every supported PyTorch/backend combination.
 
 | Check | Observed result |
 | --- | --- |
-| Full suite with CUDA required | 172 tests and 15 subtests passed |
-| Installed-wheel CPU suite | 113 tests and 15 subtests passed; 59 CUDA tests deselected |
+| Full suite with four GPUs and CUDA required | 401 tests and 15 subtests passed |
+| Installed-wheel CPU suite | 334 tests and 15 subtests passed; 67 CUDA tests deselected |
 | Independent CUDA integration | Six groups passed, including controlled fresh-process resume |
-| Checkpoint controls | Six CPU AMP restart splits and twelve same-dtype precision cases matched uninterrupted execution bitwise |
-| Replay/AMP benchmark matrix | 72 process runs and 1,800 timed updates completed without overflow skips |
+| Trainer and loader recovery | Controlled CPU/CUDA failures, four-rank rollback, physical GPU remapping and native FP32 compiler-cache recreation passed |
+| DDP/AMP scaling benchmark | 54 process runs and 16,200 timed updates; five slowdown bounds passed, one inconclusive |
 | Build and packaging | Wheel/sdist, strict metadata checks and installed-wheel usage passed |
 | AdaGC vs global application quality | Inconclusive against a 2% relative validation-loss margin |
 
@@ -502,7 +503,7 @@ A focused AMP memory probe used FP32 `Linear(1024,1024)` weights with uint8 mome
 
 The application comparison used three paired seeds, 1,100 updates per arm and a small real-audio subset with a custom training loop. AdaGC's mean relative validation loss was **+0.965%**, with a 95% interval of **−1.272% to +3.201%**. That interval does not establish noninferiority at the declared +2% margin. Short runs without loss spikes do not establish long-term stability. AdaGC adds per-tensor history and clipping work; measure its training-time cost alongside task quality.
 
-The [validation report](docs/validation-audit-fixes.md) and [raw results and reproduction commands](docs/evidence/audit-fixes-2026-11-11/README.md) describe the tests, memory probe, matched study and benchmark matrix. The repository does not include application audio, model-source dependencies or trained checkpoints. Synthetic tests and benchmarks need no application dataset.
+The [integration report](docs/validation-integrations.md) and [raw integration evidence](docs/evidence/integrations-2026-11-12/README.md) describe DDP, layouts, recovery, compiler probes and scaling measurements. The [application validation report](docs/validation-audit-fixes.md) and [its raw results](docs/evidence/audit-fixes-2026-11-11/README.md) describe the AMP memory probe and matched quality study. The repository does not include application audio, model-source dependencies or trained checkpoints. Synthetic tests and benchmarks need no application dataset.
 
 | Configuration | Status |
 | --- | --- |
@@ -511,13 +512,49 @@ The [validation report](docs/validation-audit-fixes.md) and [raw results and rep
 | Actual FP16/BF16 parameters with master weights | Numerical tests; observe the GradScaler restriction above |
 | CPU | Numerical/API tests, examples and build CI |
 | Native BF16 throughput on SM75 | Unavailable; no performance claim |
-| Sparse gradients, FP64/complex parameters, noncontiguous parameters | Rejected |
+| Sparse gradients, FP64/complex parameters, overlapping/stepped parameter views | Rejected |
+| Channels-last/3d and dense transposed/permuted weights | Tested; staging preserves original weight storage and layout |
 | Multiple devices in one optimizer | Rejected |
-| DDP, paging, compiled optimizer, arbitrary worker restart | Unverified |
+| DDP | One process/optimizer per GPU; see the distributed training contract below |
+| Native managed paging | Unsupported with the pinned allocator; eligible requests fail before updates |
+| Compiled model, FP32 | Native Inductor fixture passed; short 2-/4-rank DDP smoke tested |
+| Compiled model, FP16 autocast | Not qualified: tested Inductor fixture exceeded fixed gradient/sign gates |
+| Compiled optimizer | Partial Dynamo capture with exact replay; no speed claim; fullgraph unsupported |
+| Worker restart | Fixed-world-size, checkpoint/replay fixtures; arbitrary external streams excluded |
 | FSDP/ZeRO gradient shards, CUDA graphs | Unsupported |
-| FP8 integration | Unverified |
+| Native FP8 compute integration | Hardware-blocked on this SM75 node; capability checks reject required FP8 |
 
 Flattening parameters changes AdaGC's tensor granularity. Distributed shards require logical-tensor norm reductions and shared history semantics before use. Clipping cannot fix upstream numerical drift, infrastructure errors or nonfinite inputs.
+
+## Distributed training and recovery
+
+Standard DDP uses one process and one optimizer per GPU. Each replica clips the gradients that DDP has already synchronized; do not reduce replica norms a second time. Keep scaler initialization, learning-rate schedules and update boundaries consistent across ranks. FP32 parameters with FP16 autocast, GradScaler and AdaGC passed two-/four-GPU fixtures across the default 100-step warmup boundary. Tests also cover accumulation, unused branches and late activation of parameters already registered with DDP. For accumulation, put both forward and backward in `no_sync()` on nonfinal microbatches, then clip/update after the synchronized backward.
+
+```bash
+NCCL_P2P_DISABLE=1 torchrun --standalone --nproc-per-node=4 examples/train_ddp.py
+```
+
+The recorded four-GPU node uses SHM transport with `NCCL_P2P_DISABLE=1`; validate NCCL transport settings for your own topology. The integration runner additionally checks rank agreement and compares updates against an independent reduced-gradient replay. Those diagnostic collectives are part of validation, not implicit synchronization inside `LionPlus8bit.step()`. Rank-local changes after gradient reduction can invalidate AMP skip agreement. Parameters excluded from DDP at construction need a coordinated rebuild before becoming trainable. Uneven loop termination with `join()` does not by itself restore optimizer/AdaGC/scaler agreement.
+
+The reference helper in [`examples/_training_state.py`](examples/_training_state.py) saves model buffers, optimizer, scaler, scheduler, per-rank RNG and consumed-data state in atomically committed checkpoint generations. The [`restart runner`](tools/restart_integration.py) verifies rollback by comparing with uninterrupted execution. A trainer or DataLoader failure rolls the worker group back and recreates loaders; unfinished accumulation is replayed. Exact replay requires a deterministic execution configuration, fixed world size and restartable data. Prefetched batches do not count as consumed, and AMP-skipped attempts still consume data. Tests include four-rank channels-last AMP rollback, physical GPU remapping at fixed world size, transposed weights with AMP, and native FP32 compiled-model cache recreation. A remapped run compares continuation with a control on the new GPU placement. Arbitrary streams, live worker replacement and changed-world-size bitwise replay are outside this contract.
+
+To run the full DDP checks or exercise checkpoint rollback, use a fresh output directory:
+
+```bash
+NCCL_P2P_DISABLE=1 python -m torch.distributed.run --standalone --nproc-per-node=4 \
+  tools/ddp_integration.py --channels-last --output results/ddp-layout4
+NCCL_P2P_DISABLE=1 python tools/restart_integration.py \
+  --device cuda --world-size 4 --loader-workers 2 \
+  --fault-point after-step --output results/restart4
+```
+
+For uneven sample counts, weight local mean losses by `world_size * local_count / global_count` before backward. Detect exhausted input together before starting another forward; the checked runner rejects partial participation. `find_unused_parameters=True` is needed when the model's graph leaves parameters unused. A parameter unused on one rank can still receive DDP's synchronized gradient, so AdaGC follows the gradient that actually reaches the optimizer.
+
+Layout support stages one noncontiguous weight at a time and copies results into its original storage. It uses extra temporary memory and can add copy overhead; it does not keep a persistent FP32 shadow for every FP32 weight. Checkpoints store canonical state independent of physical strides.
+
+Compilation and FP8 are separate from 8-bit optimizer state. Native Inductor FP32 model fixtures passed numerical checks, with short FP32 DDP smoke runs on two/four GPUs. FP16-autocast Inductor did not meet the preset gradient/sign gates, so that combination remains unqualified. The optimizer still matched eager replay when supplied the same compiled gradients. Partial optimizer capture is a separate compatibility result, not a fusion or throughput claim; fullgraph optimizer capture remains unsupported. Native FP8 needs a compatible GPU/backend and high-precision optimizer-facing parameters/gradients. [`examples/train_fp8.py`](examples/train_fp8.py) illustrates the proposed Transformer Engine contract with FP32 primary weights and ordinary unscaled gradients; it is not a qualified FP8 adapter. Merely installing Transformer Engine or casting tensors to float8 does not qualify FP8 training. The four Quadro RTX 6000 GPUs used here are SM75 and cannot execute the native FP8 qualification. The capability probe remains unqualified even on a compatible device until the positive numerical, cache, checkpoint and distributed tests are completed.
+
+See [integration validation](docs/validation-integrations.md) for exact commands, version/transport settings, test outcomes and unresolved cases.
 
 ## Development and CI
 
@@ -532,7 +569,7 @@ python -m ruff check .
 python -m ruff format --check .
 ```
 
-[CI](https://github.com/julian-carpenter/LionPlus8Bit/actions/workflows/ci.yml) runs on pushes and pull requests for Python 3.11/3.12 with current CPU PyTorch, plus Python 3.10 with PyTorch 2.5.0 to enforce the declared minimum versions. It builds distributions, installs the wheel, checks imports outside the checkout, runs CPU tests and both clipping examples, and uploads test/build artifacts. The badge covers this workflow. No PyPI publishing step is configured.
+[CI](https://github.com/julian-carpenter/LionPlus8Bit/actions/workflows/ci.yml) runs on pushes and pull requests for Python 3.11/3.12 with current CPU PyTorch, plus Python 3.10 with PyTorch 2.5.0 to enforce the declared minimum versions. It builds distributions, installs the wheel, checks imports outside the checkout, runs CPU tests and both clipping examples, and uploads test/build artifacts. The badge covers this workflow. No PyPI publishing step is configured. The separate [training integration workflow](https://github.com/julian-carpenter/LionPlus8Bit/actions/workflows/integrations.yml) is manually dispatched on a trusted self-hosted runner with at least four GPUs; it runs CUDA/layout tests, DDP, unused branches and checkpoint rollback and uploads raw results. Configuration of that workflow does not imply that a runner is registered.
 
 [CUDA validation](https://github.com/julian-carpenter/LionPlus8Bit/actions/workflows/cuda.yml) is a manual workflow for a trusted Linux x64 runner labeled `gpu` with CUDA PyTorch installed. It requires real CUDA, runs the regression suite, independent integration checks and examples, and uploads logs. `pytest` skips CUDA-marked tests without a GPU unless you supply `--require-cuda`, which fails instead. The unittest integration tool performs its own CUDA check and does not accept that pytest flag.
 

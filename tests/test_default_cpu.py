@@ -85,7 +85,7 @@ def test_default_extreme_clipping_ratio():
 
 
 def test_default_rejects_parameter_layout_before_initialization():
-    p = torch.nn.Parameter(torch.ones(3, 4).t())
+    p = torch.nn.Parameter(torch.ones(3, 8)[:, ::2])
     optimizer = LionPlus8bit([p])
     p.grad = torch.ones_like(p)
     with pytest.raises(RuntimeError, match="contiguous"):

@@ -19,6 +19,8 @@ from packaging.version import Version
 from torch import Tensor
 from ._numerical_guard import tiny_value_flag
 from ._strict import strict_update
+from ._layout import validate_parameter_layouts, parameter_layout, canonical_work, copy_back
+from ._paging import allocate_state, validate_paging_request, checkpoint_values
 from ._clipping import ClippingConfig, ClippingState, prepare_clipping, commit_clipping
 
 __all__ = ["LionPlus8bit"]
@@ -49,7 +51,8 @@ def _validate_hyperparameters(group: dict[str, Any]) -> None:
 class LionPlus8bit(bnb.optim.Lion8bit):
     """Lion+ with native blockwise uint8 momentum and global clipping.
 
-    Uses one device and contiguous parameters; preserves original gradient objects.
+    Uses one device and dense nonoverlapping parameters; preserves original storage
+    layout and gradient objects. Native work and state use logical row-major order.
     FP16/BF16 parameters have FP32 master weights by default (additional 4N bytes).
     Prefer FP32 parameters with autocast. Disable master_weights only deliberately.
     Ordinary values use batched norm reduction and native gradient scaling.
@@ -235,40 +238,24 @@ class LionPlus8bit(bnb.optim.Lion8bit):
         device = params[0].device
         if any(p.device != device for group in self.param_groups for p in group["params"]):
             raise RuntimeError("Use one optimizer per device, including inactive parameters")
-        for p in params:
-            if not p.is_contiguous():
-                raise RuntimeError(
-                    "LionPlus8bit requires contiguous parameters; views must not be silently copied"
-                )
-            if p.device != device:
-                raise RuntimeError("Use one optimizer per device")
+        all_params = [p for group in self.param_groups for p in group["params"]]
+        validate_parameter_layouts(all_params)
+        validate_paging_request(all_params, is_paged=self.is_paged)
         layouts = getattr(self, "_parameter_layouts", {})
         parameter_storages = {
-            (p.device, p.untyped_storage().data_ptr())
-            for group in self.param_groups
-            for p in group["params"]
-            if p.numel()
+            (p.device, p.untyped_storage().data_ptr()) for p in all_params if p.numel()
         }
-        ranges = {}
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.numel() and p.is_contiguous():
-                    key = (p.device, p.untyped_storage().data_ptr())
-                    start = p.storage_offset() * p.element_size()
-                    ranges.setdefault(key, []).append((start, start + p.numel() * p.element_size()))
-        for intervals in ranges.values():
-            intervals.sort()
-            if any(left[1] > right[0] for left, right in zip(intervals, intervals[1:])):
-                raise RuntimeError("Parameter storage ranges must not overlap")
         for p in params:
-            if id(p) in layouts and layouts[id(p)] != (p.dtype, p.device):
-                raise RuntimeError("Live parameter dtype/device changes require a fresh optimizer")
+            if id(p) in layouts and layouts[id(p)] != parameter_layout(p):
+                raise RuntimeError(
+                    "Live parameter dtype/device/layout changes require a fresh optimizer"
+                )
             if (
                 p.grad.numel()
                 and (p.grad.device, p.grad.untyped_storage().data_ptr()) in parameter_storages
             ):
                 raise RuntimeError("Parameter and gradient storage must not overlap")
-            layouts[id(p)] = (p.dtype, p.device)
+            layouts[id(p)] = parameter_layout(p)
         self._parameter_layouts = layouts
         if not self.initialized:
             self.check_overrides()
@@ -472,9 +459,11 @@ class LionPlus8bit(bnb.optim.Lion8bit):
         for hook in self._optimizer_state_dict_pre_hooks.values():
             hook(self)
         with self._without_checkpoint_hooks("state_dict"):
-            result = super().state_dict()
+            result = checkpoint_values(super().state_dict())
         result["lionplus_config"] = dict(
-            version=2,
+            version=3,
+            state_order="logical-row-major-v1",
+            parameter_shapes=[[tuple(p.shape) for p in g["params"]] for g in self.param_groups],
             clipping=self.clipping,
             adagc_beta=self.clipping_config.beta,
             adagc_factor=self.clipping_config.factor,
@@ -513,6 +502,13 @@ class LionPlus8bit(bnb.optim.Lion8bit):
             if replacement is not None:
                 state_dict = replacement
         config = state_dict.get("lionplus_config")
+        if config is not None and config.get("version") == 3:
+            if config.get("state_order") != "logical-row-major-v1":
+                raise ValueError("Unsupported LionPlus checkpoint state order")
+            shapes = [[tuple(p.shape) for p in g["params"]] for g in self.param_groups]
+            if config.get("parameter_shapes") != shapes:
+                raise ValueError("Incompatible checkpoint parameter shape mapping")
+        validate_parameter_layouts([p for g in self.param_groups for p in g["params"]])
         # Validate incoming groups before changing overrides, allocation policy,
         # native state or clipping state. The base loader assigns groups eagerly.
         incoming = state_dict.get("param_groups", [])
@@ -536,12 +532,14 @@ class LionPlus8bit(bnb.optim.Lion8bit):
                     _validate_hyperparameters(dict(group, **override))
         if (
             config is not None
-            and config.get("version") == 2
+            and config.get("version") in (2, 3)
             and config.get("edge_policy") != "positive-bootstrap-v1"
         ):
             raise ValueError("Unsupported AdaGC edge policy")
         mode = (
-            config.get("clipping", "global") if config and config.get("version") == 2 else "global"
+            config.get("clipping", "global")
+            if config and config.get("version") in (2, 3)
+            else "global"
         )
         clipping_config = (
             ClippingConfig(
@@ -602,13 +600,19 @@ class LionPlus8bit(bnb.optim.Lion8bit):
             restored.exceptions = dict(exceptions)
             restored.steps = saved["steps"]
         if config is not None:
-            if config.get("version") not in (1, 2):
+            if config.get("version") not in (1, 2, 3):
                 raise ValueError("Unsupported LionPlus checkpoint configuration version")
             if self.state and (
                 self.is_paged != config["is_paged"]
                 or self.master_weights != config["master_weights"]
             ):
                 raise ValueError("Load changed allocation policy into a fresh optimizer")
+        if move_to_device:
+            validate_paging_request(
+                [p for g in self.param_groups for p in g["params"]],
+                is_paged=config["is_paged"] if config else self.is_paged,
+            )
+        state_dict = checkpoint_values(state_dict)
         with self._without_checkpoint_hooks("load_state_dict"):
             super().load_state_dict(state_dict, move_to_device=move_to_device)
         if config is not None:
@@ -640,6 +644,15 @@ class LionPlus8bit(bnb.optim.Lion8bit):
         for hook in self._optimizer_load_state_dict_post_hooks.values():
             hook(self)
 
+    def get_state_buffer(self, p, dtype=torch.float32):
+        return allocate_state(p, dtype, is_paged=self.is_paged)
+
+    def to_gpu(self):
+        validate_paging_request(
+            [p for g in self.param_groups for p in g["params"]], is_paged=self.is_paged
+        )
+        super().to_gpu()
+
     @torch.no_grad()
     def update_step(self, group, p, gindex, pindex):
         if self._clip_scale is None:
@@ -649,8 +662,8 @@ class LionPlus8bit(bnb.optim.Lion8bit):
         config = self.get_config(gindex, pindex, group)
         use_master = self.master_weights and p.dtype != torch.float32
         if use_master and "master_weight" not in state:
-            state["master_weight"] = p.detach().float().clone()
-        target = state["master_weight"] if use_master else p
+            state["master_weight"] = p.detach().float().contiguous()
+        target = state["master_weight"] if use_master else canonical_work(p)
         use_scale = (
             self.native_gradient_scale
             and p.dtype == torch.float32
@@ -667,7 +680,8 @@ class LionPlus8bit(bnb.optim.Lion8bit):
             )
         if use_master:
             grad = grad.float()
-        if use_master or use_scale:
+        staged_weight = not p.is_contiguous()
+        if use_master or use_scale or staged_weight:
             grad = grad.contiguous()
         if (
             self.clipping == "adagc"
@@ -688,7 +702,7 @@ class LionPlus8bit(bnb.optim.Lion8bit):
             if strict:
                 state["strict_math"] = True
                 strict_update(target, grad, state, config, current, default)
-            elif use_master or use_scale:
+            elif use_master or use_scale or staged_weight:
                 if current is not None:
                     if current != default:
                         default.wait_stream(current)
@@ -745,7 +759,7 @@ class LionPlus8bit(bnb.optim.Lion8bit):
                 for tensor in [grad, target, *[v for v in state.values() if isinstance(v, Tensor)]]:
                     if tensor.device.type == "cuda":
                         tensor.record_stream(default)
-            if use_master:
-                p.copy_(target)
+            if use_master or staged_weight:
+                copy_back(p, target)
         finally:
             p.grad = original_grad
